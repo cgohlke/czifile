@@ -44,9 +44,9 @@ setup(
     python_requires='>=2.7',
     install_requires=[
         'numpy>=1.11.3',
-        'scipy>=1.0',
-        'tifffile>=2018.10.18',
-        'imagecodecs>=2018.10.18;platform_system=="Windows"'
+        'scipy>=1.1',
+        'tifffile>=2019.1.1',
+        'imagecodecs>=2019.1.1;platform_system=="Windows"'
         ],
     tests_require=['pytest'],
     entry_points={
@@ -63,7 +63,6 @@ setup(
         'Programming Language :: Python :: 2',
         'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.4',
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
