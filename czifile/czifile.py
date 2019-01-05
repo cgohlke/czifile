@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # czifile.py
 
-# Copyright (c) 2013-2018, Christoph Gohlke
-# Copyright (c) 2013-2018, The Regents of the University of California
+# Copyright (c) 2013-2019, Christoph Gohlke
+# Copyright (c) 2013-2019, The Regents of the University of California
 # Produced at the Laboratory for Fluorescence Dynamics.
 # All rights reserved.
 #
@@ -44,19 +44,21 @@ contain multidimensional images and metadata from microscopy experiments.
 :Organization:
   Laboratory for Fluorescence Dynamics. University of California, Irvine
 
-:Version: 2018.10.18
+:Version: 2019.1.1
 
 Requirements
 ------------
 * `CPython 2.7 or 3.5+ <https://www.python.org>`_
 * `Numpy 1.14 <https://www.numpy.org>`_
 * `Scipy 1.1 <https://www.scipy.org>`_
-* `Tifffile 2018.10.18 <https://www.lfd.uci.edu/~gohlke/>`_
-* `Imagecodecs 2018.10.18 <https://www.lfd.uci.edu/~gohlke/>`_
-  (optional for decoding LZW, JPEG, and JPEG XR)
+* `Tifffile 2019.1.1 <https://pypi.org/project/tifffile/>`_
+* `Imagecodecs 2019.1.1 <https://pypi.org/project/imagecodecs/>`_
+  (optional; used for decoding LZW, JPEG, and JPEG XR)
 
 Revisions
 ---------
+2019.1.1
+    Update copyright year.
 2018.10.18
     Rename zisraw package to czifile.
 2018.8.29
@@ -134,7 +136,7 @@ array([10, 10, 10], dtype=uint8)
 
 from __future__ import division, print_function
 
-__version__ = '2018.10.18'
+__version__ = '2019.1.1'
 __docformat__ = 'restructuredtext en'
 __all__ = 'imread', 'CziFile'
 
@@ -225,8 +227,8 @@ class CziFile(object):
             name, _ = match_filename(arg)
             self._fh = FileHandle(name)
             self.header = Segment(self._fh, 0).data()
-            assert(self.header.primary_file_guid == self.header.file_guid)
-            assert(self.header.file_part == 0)
+            assert self.header.primary_file_guid == self.header.file_guid
+            assert self.header.file_part == 0
 
         if self.header.update_pending:
             warnings.warn('file is pending update')
@@ -422,6 +424,7 @@ class CziFile(object):
         return out
 
     def close(self):
+        """Close file handle."""
         self._fh.close()
 
     def __enter__(self):
@@ -481,7 +484,6 @@ class Segment(object):
 
 class SegmentNotFoundError(Exception):
     """Exception to indicate that file position does not contain Segment."""
-    pass
 
 
 class FileHeaderSegment(object):
@@ -598,7 +600,7 @@ class SubBlockSegment(object):
                 fh.seek(self.data_offset)
                 data = fh.read(self.data_size)
             return data
-        elif de.compression:
+        if de.compression:
             # if de.compression not in DECOMPRESS:
             #     raise ValueError('compression unknown or not supported')
             with fh.lock:
@@ -688,7 +690,7 @@ class DirectoryEntryDV(object):
          dimensions_count,
          ) = struct.unpack('<2s4xq14xi', fh.read(32))
         fh.seek(dimensions_count * 20, 1)
-        assert(schema_type == b'DV')
+        assert schema_type == b'DV'
         return file_position
 
     def __init__(self, fh):
@@ -753,6 +755,7 @@ class DirectoryEntryDV(object):
         for dim in self.dimension_entries:
             if dim.dimension == 'M':
                 return dim.start
+        return None
 
     def data_segment(self):
         """Read and return SubBlockSegment at file_position."""
@@ -805,7 +808,7 @@ class SubBlockDirectorySegment(object):
     Contains entries of any kind, currently only DirectoryEntryDV.
 
     """
-    __slots__ = 'entries',
+    __slots__ = ('entries',)
 
     SID = 'ZISRAWDIRECTORY'
 
@@ -876,8 +879,7 @@ class AttachmentSegment(object):
         cotype = self.attachment_entry.content_file_type
         if not raw and cotype in CONTENT_FILE_TYPE:
             return CONTENT_FILE_TYPE[cotype](self._fh, filesize=self.data_size)
-        else:
-            return self._fh.read(self.data_size)
+        return self._fh.read(self.data_size)
 
     def __str__(self):
         return 'AttachmentSegment\n %s' % self.attachment_entry
@@ -894,7 +896,7 @@ class AttachmentEntryA1(object):
         """Return file position of associated Attachment segment."""
         schema_type, file_position = struct.unpack('<2s10xq', fh.read(20))
         fh.seek(108, 1)
-        assert(schema_type == b'A1')
+        assert schema_type == b'A1'
         return file_position
 
     def __init__(self, fh):
@@ -934,7 +936,7 @@ class AttachmentEntryA1(object):
 class AttachmentDirectorySegment(object):
     """ZISRAWATTDIR segment data. Sequence of AttachmentEntryA1."""
 
-    __slots__ = 'entries',
+    __slots__ = ('entries',)
 
     SID = 'ZISRAWATTDIR'
 
@@ -1107,7 +1109,7 @@ CONTENT_FILE_TYPE = {
     'CZEXP': read_xml,  # Experiment
     'CZHWS': read_xml,  # HardwareSetting
     'CZMVM': read_xml,  # MultiviewMicroscopy
-    'CZFBMX': read_xml, # FiberMatrix
+    'CZFBMX': read_xml,  # FiberMatrix
     # 'CZPML': PalMoleculeList,  # undocumented
     # 'ZIP'
     # 'JPG'
