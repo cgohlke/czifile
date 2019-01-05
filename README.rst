@@ -11,19 +11,21 @@ contain multidimensional images and metadata from microscopy experiments.
 :Organization:
   Laboratory for Fluorescence Dynamics. University of California, Irvine
 
-:Version: 2018.10.18
+:Version: 2019.1.1
 
 Requirements
 ------------
 * `CPython 2.7 or 3.5+ <https://www.python.org>`_
 * `Numpy 1.14 <https://www.numpy.org>`_
 * `Scipy 1.1 <https://www.scipy.org>`_
-* `Tifffile 2018.10.18 <https://www.lfd.uci.edu/~gohlke/>`_
-* `Imagecodecs 2018.10.18 <https://www.lfd.uci.edu/~gohlke/>`_
-  (optional for decoding LZW, JPEG, and JPEG XR)
+* `Tifffile 2019.1.1 <https://pypi.org/project/tifffile/>`_
+* `Imagecodecs 2019.1.1 <https://pypi.org/project/imagecodecs/>`_
+  (optional; used for decoding LZW, JPEG, and JPEG XR)
 
 Revisions
 ---------
+2019.1.1
+    Update copyright year.
 2018.10.18
     Rename zisraw package to czifile.
 2018.8.29
