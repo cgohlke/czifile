@@ -10,9 +10,12 @@ Usage: czi2tif czi_filename [tif_filename]
 import sys
 
 try:
-    from .czifile import czi2tiff
+    from .czifile import czi2tif
 except ImportError:
-    from czifile import czi2tiff
+    try:
+        from czifile.czifile import czi2tif
+    except ImportError:
+        from czifile import czi2tif
 
 
 def main(argv=None):
@@ -23,8 +26,8 @@ def main(argv=None):
         truncate = '--truncate' in argv
         if truncate:
             argv.remove('--truncate')
-        czi2tiff(argv[1], argv[2] if len(argv) > 2 else None,
-                 bigtiff=True, truncate=truncate)
+        czi2tif(argv[1], argv[2] if len(argv) > 2 else None,
+                bigtiff=True, truncate=truncate)
     else:
         print()
         print(__doc__)
