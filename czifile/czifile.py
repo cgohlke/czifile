@@ -44,7 +44,9 @@ contain multidimensional images and metadata from microscopy experiments.
 :Organization:
   Laboratory for Fluorescence Dynamics. University of California, Irvine
 
-:Version: 2019.1.1
+:License: 3-clause BSD
+
+:Version: 2019.1.26
 
 Requirements
 ------------
@@ -57,7 +59,8 @@ Requirements
 
 Revisions
 ---------
-2019.1.1
+2019.1.26
+    Fix czi2tif console script.
     Update copyright year.
 2018.10.18
     Rename zisraw package to czifile.
@@ -136,9 +139,14 @@ array([10, 10, 10], dtype=uint8)
 
 from __future__ import division, print_function
 
-__version__ = '2019.1.1'
+__version__ = '2019.1.26'
 __docformat__ = 'restructuredtext en'
-__all__ = 'imread', 'CziFile'
+__all__ = ('imread', 'CziFile', 'czi2tif',
+           'Segment', 'SegmentNotFoundError', 'FileHeaderSegment',
+           'MetadataSegment', 'SubBlockSegment', 'DirectoryEntryDV',
+           'DimensionEntryDV1', 'SubBlockDirectorySegment',
+           'AttachmentSegment', 'AttachmentEntryA1', 'EventListEntry',
+           'AttachmentDirectorySegment', 'DeletedSegment', 'UnknownSegment')
 
 import os
 import sys
