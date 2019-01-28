@@ -11,7 +11,9 @@ contain multidimensional images and metadata from microscopy experiments.
 :Organization:
   Laboratory for Fluorescence Dynamics. University of California, Irvine
 
-:Version: 2019.1.1
+:License: 3-clause BSD
+
+:Version: 2019.1.26
 
 Requirements
 ------------
@@ -24,7 +26,8 @@ Requirements
 
 Revisions
 ---------
-2019.1.1
+2019.1.26
+    Fix czi2tif console script.
     Update copyright year.
 2018.10.18
     Rename zisraw package to czifile.
