@@ -46,19 +46,23 @@ contain multidimensional images and metadata from microscopy experiments.
 
 :License: 3-clause BSD
 
-:Version: 2019.1.26
+:Version: 2019.5.22
 
 Requirements
 ------------
 * `CPython 2.7 or 3.5+ <https://www.python.org>`_
 * `Numpy 1.14 <https://www.numpy.org>`_
-* `Scipy 1.1 <https://www.scipy.org>`_
-* `Tifffile 2019.1.1 <https://pypi.org/project/tifffile/>`_
-* `Imagecodecs 2019.1.1 <https://pypi.org/project/imagecodecs/>`_
+* `Tifffile 2019.5.22 <https://pypi.org/project/tifffile/>`_
+* `Imagecodecs 2019.5.22 <https://pypi.org/project/imagecodecs/>`_
   (optional; used for decoding LZW, JPEG, and JPEG XR)
 
 Revisions
 ---------
+2019.5.22
+    Fix czi2tif conversion when CZI metadata contain non-ASCII characters.
+    Use imagecodecs_lite as a fallback for imagecodecs.
+    Make CziFile.metadata a function (breaking).
+    Make scipy an optional dependency; fallback on ndimage or fail on zoom().
 2019.1.26
     Fix czi2tif console script.
     Update copyright year.
@@ -82,8 +86,8 @@ Revisions
     Add function to convert CZI file to memory-mappable TIFF file.
 2017.7.11
     Add 'out' parameter to CziFile.asarray.
-    Remove memmap option from CziFile.asarray (backwards incompatible).
-    Change spline interpolation order to 0 (backwards incompatible).
+    Remove memmap option from CziFile.asarray (breaking).
+    Change spline interpolation order to 0 (breaking).
     Make axes return a string.
     Require tifffile 2017.7.11.
 2014.10.10
@@ -103,14 +107,19 @@ Python 2.7 and 3.4 are deprecated.
 "ZEISS" and "Carl Zeiss" are registered trademarks of Carl Zeiss AG.
 
 The ZISRAW file format design specification [1] is confidential and the
-licence agreement does not permit to write data into CZI files.
+license agreement does not permit to write data into CZI files.
 
 Only a subset of the 2016 specification is implemented. Specifically,
 multifile images, image pyramids, and topography images are not yet supported.
 
 Tested on Windows with a few example files only.
 
-Other libraries for reading CZI files (GPL licensed):
+Czifile relies on the `imagecodecs <https://pypi.org/project/imagecodecs/>`_
+package for decoding LZW, JPEG, and JPEG XR compressed images. Alternatively,
+the `imagecodecs_lite <https://pypi.org/project/imagecodecs_lite/>`_ package
+can be used for decoding LZW compressed images.
+
+Other libraries for reading CZI files (all GPL licensed):
 
 * `libCZI <https://github.com/zeiss-microscopy/libCZI>`_
 * `Python-bioformats <https://github.com/CellProfiler/python-bioformats>`_
@@ -118,7 +127,7 @@ Other libraries for reading CZI files (GPL licensed):
 
 References
 ----------
-1) ZISRAW (CZI) File Format Design specification Release Version 1.2.2.
+1) ZISRAW (CZI) File Format Design Specification Release Version 1.2.2.
    CZI 07-2016/CZI-DOC ZEN 2.3/DS_ZISRAW-FileFormat.pdf (confidential).
    Documentation can be requested at
    `<https://www.zeiss.com/microscopy/us/products/microscope-software/zen/
@@ -139,7 +148,7 @@ array([10, 10, 10], dtype=uint8)
 
 from __future__ import division, print_function
 
-__version__ = '2019.1.26'
+__version__ = '2019.5.22'
 __docformat__ = 'restructuredtext en'
 __all__ = ('imread', 'CziFile', 'czi2tif',
            'Segment', 'SegmentNotFoundError', 'FileHeaderSegment',
@@ -160,16 +169,27 @@ import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy
-from scipy.ndimage.interpolation import zoom
 
-from tifffile import (FileHandle, memmap, lazyattr, repeat_nd,
-                      product, stripnull, format_size, squeeze_axes,
-                      create_output, xml2dict, pformat)
+try:
+    # TODO: use zoom fom imagecodecs implementation when available
+    from scipy.ndimage.interpolation import zoom
+except ImportError:
+    try:
+        from ndimage.interpolation import zoom
+    except ImportError:
+        zoom = None
 
 try:
     import imagecodecs
 except ImportError:
-    imagecodecs = None
+    try:
+        import imagecodecs_lite as imagecodecs
+    except ImportError:
+        imagecodecs = None
+
+from tifffile import (FileHandle, memmap, lazyattr, repeat_nd,
+                      product, stripnull, format_size, squeeze_axes,
+                      create_output, xml2dict, pformat)
 
 
 def imread(filename, *args, **kwargs):
@@ -263,7 +283,6 @@ class CziFile(object):
                 yield segment.data()
             fpos = segment.data_offset + segment.allocated_size
 
-    @lazyattr
     def metadata(self, raw=True):
         """Return data from MetadataSegment as XML (default) or dict.
 
@@ -450,7 +469,7 @@ class CziFile(object):
             str(self.axes),
             str(self.shape),
             str(self.dtype),
-            pformat(self.metadata),
+            pformat(self.metadata()),
         ))
 
 
@@ -651,6 +670,8 @@ class SubBlockSegment(object):
         data.shape = shape
 
         # resize RGB components separately for speed
+        if zoom is None:
+            raise ImportError("cannot import 'zoom' from scipy or ndimage")
         if shape[-1] in (3, 4) and factors[-1] == 1.0:
             factors = factors[:-1]
             old = data
@@ -1171,9 +1192,10 @@ DECOMPRESS = {
 }
 
 if imagecodecs is not None:
-    DECOMPRESS[1] = imagecodecs.jpeg_decode
     DECOMPRESS[2] = imagecodecs.lzw_decode
-    DECOMPRESS[4] = imagecodecs.jxr_decode
+    if hasattr(imagecodecs, 'jpeg_decode'):
+        DECOMPRESS[1] = imagecodecs.jpeg_decode
+        DECOMPRESS[4] = imagecodecs.jxr_decode
 
 
 def czi2tif(czifile, tiffile=None, squeeze=True, verbose=True, **kwargs):
@@ -1219,10 +1241,14 @@ def czi2tif(czifile, tiffile=None, squeeze=True, verbose=True, **kwargs):
             start_time = time.time()
             if 'software' not in kwargs:
                 kwargs['software'] = 'czi2tif'
+            try:
+                description = str2bytes(czi.metadata(), 'utf8')
+            except Exception:
+                description = None
             metadata = kwargs.pop('metadata', {})
             metadata.update(axes=axes, dtype=dtype)
             data = memmap(tiffile, shape=shape, dtype=dtype, metadata=metadata,
-                          description=czi.metadata, **kwargs)
+                          description=description, **kwargs)
             data = data.reshape(czi.shape)
             verbose('%.3f s' % (time.time() - start_time))
             verbose('Copying image from CZI to TIF file... ',
@@ -1243,6 +1269,10 @@ if sys.version_info[0] == 2:
     def bytes2str(b, encoding=None):
         """Return string from bytes."""
         return b
+
+    def str2bytes(s, encoding=None):
+        """Return bytes from string."""
+        return s
 else:
     basestring = str, bytes
     print_ = print
@@ -1257,6 +1287,10 @@ else:
     def bytes2str(b, encoding='cp1252'):
         """Return unicode string from bytes."""
         return str(b, encoding)
+
+    def str2bytes(s, encoding='cp1252'):
+        """Return bytes from unicode string."""
+        return s.encode(encoding)
 
 
 if __name__ == '__main__':
