@@ -46,18 +46,22 @@ contain multidimensional images and metadata from microscopy experiments.
 
 :License: 3-clause BSD
 
-:Version: 2019.5.22
+:Version: 2019.6.18
 
 Requirements
 ------------
 * `CPython 2.7 or 3.5+ <https://www.python.org>`_
 * `Numpy 1.14 <https://www.numpy.org>`_
-* `Tifffile 2019.5.22 <https://pypi.org/project/tifffile/>`_
+* `Tifffile 2019.6.18 <https://pypi.org/project/tifffile/>`_
 * `Imagecodecs 2019.5.22 <https://pypi.org/project/imagecodecs/>`_
   (optional; used for decoding LZW, JPEG, and JPEG XR)
 
 Revisions
 ---------
+2019.6.18
+    Add package main function to view CZI files.
+    Fix BGR to RGB conversion.
+    Fix czi2tif conversion on Python 2.
 2019.5.22
     Fix czi2tif conversion when CZI metadata contain non-ASCII characters.
     Use imagecodecs_lite as a fallback for imagecodecs.
@@ -148,20 +152,32 @@ array([10, 10, 10], dtype=uint8)
 
 from __future__ import division, print_function
 
-__version__ = '2019.5.22'
+__version__ = '2019.6.18'
 __docformat__ = 'restructuredtext en'
-__all__ = ('imread', 'CziFile', 'czi2tif',
-           'Segment', 'SegmentNotFoundError', 'FileHeaderSegment',
-           'MetadataSegment', 'SubBlockSegment', 'DirectoryEntryDV',
-           'DimensionEntryDV1', 'SubBlockDirectorySegment',
-           'AttachmentSegment', 'AttachmentEntryA1', 'EventListEntry',
-           'AttachmentDirectorySegment', 'DeletedSegment', 'UnknownSegment')
+__all__ = (
+    'imread',
+    'CziFile',
+    'czi2tif',
+    'Segment',
+    'SegmentNotFoundError',
+    'FileHeaderSegment',
+    'MetadataSegment',
+    'SubBlockSegment',
+    'SubBlockDirectorySegment',
+    'DirectoryEntryDV',
+    'DimensionEntryDV1',
+    'AttachmentSegment',
+    'AttachmentEntryA1',
+    'AttachmentDirectorySegment',
+    'DeletedSegment',
+    'UnknownSegment',
+    'EventListEntry',
+)
 
 import os
 import sys
 import re
 import uuid
-import time
 import struct
 import warnings
 import multiprocessing
@@ -187,9 +203,10 @@ except ImportError:
     except ImportError:
         imagecodecs = None
 
-from tifffile import (FileHandle, memmap, lazyattr, repeat_nd,
-                      product, stripnull, format_size, squeeze_axes,
-                      create_output, xml2dict, pformat)
+from tifffile import (
+    FileHandle, memmap, lazyattr, repeat_nd, product, stripnull, format_size,
+    squeeze_axes, create_output, xml2dict, pformat, imshow, askopenfilename,
+    Timer)
 
 
 def imread(filename, *args, **kwargs):
@@ -216,6 +233,7 @@ class CziFile(object):
     All attributes are read-only.
 
     """
+
     def __init__(self, arg, multifile=True, filesize=None, detectmosaic=True):
         """Open CZI file and read header.
 
@@ -370,7 +388,7 @@ class CziFile(object):
                   if dim.dimension != 'M']
                  for directory_entry in self.filtered_subblock_directory]
         shape = numpy.max(shape, axis=0)
-        shape = tuple(int(i-j) for i, j in zip(shape, self.start[:-1]))
+        shape = tuple(int(i - j) for i, j in zip(shape, self.start[:-1]))
         dtype = self.filtered_subblock_directory[0].dtype
         sampleshape = numpy.dtype(dtype).shape
         shape = shape + (sampleshape if sampleshape else (1,))
@@ -430,7 +448,7 @@ class CziFile(object):
             """Read, decode, and copy subblock data."""
             subblock = directory_entry.data_segment()
             tile = subblock.data(resize=resize, order=order)
-            index = tuple(slice(i-j, i-j+k) for i, j, k in
+            index = tuple(slice(i - j, i - j + k) for i, j, k in
                           zip(directory_entry.start, start, tile.shape))
             try:
                 out[index] = tile
@@ -519,6 +537,7 @@ class FileHeaderSegment(object):
     Contains global file metadata such as file version and GUID.
 
     """
+
     __slots__ = ('version', 'primary_file_guid', 'file_guid',
                  'file_part', 'directory_position', 'metadata_position',
                  'update_pending', 'attachment_directory_position')
@@ -555,6 +574,7 @@ class MetadataSegment(object):
     Contains global image metadata in UTF-8 encoded XML format.
 
     """
+
     __slots__ = 'xml_size', 'attachment_size', 'xml_offset', '_fh'
 
     SID = 'ZISRAWMETADATA'
@@ -569,7 +589,7 @@ class MetadataSegment(object):
         """Read metadata from file and return as XML (default) or dict."""
         self._fh.seek(self.xml_offset)
         xml = self._fh.read(self.xml_size)
-        xml = xml.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+        xml = xml.replace(b'\r\n', b'\n').replace(b'\r', b'\n')  # ???
         return unicode(xml, 'utf-8') if raw else xml2dict(xml)
 
     def __str__(self):
@@ -583,6 +603,7 @@ class SubBlockSegment(object):
     contiguous pixel data.
 
     """
+
     __slots__ = ('metadata_size', 'attachment_size', 'data_size',
                  'directory_entry', 'data_offset', '_fh')
 
@@ -644,12 +665,21 @@ class SubBlockSegment(object):
                 data = fh.read_array(dtype, self.data_size // dtype.itemsize)
 
         data = data.reshape(de.stored_shape)
+        if de.compression != 4 and de.stored_shape[-1] in (3, 4):
+            if de.stored_shape[-1] == 3:
+                # BGR -> RGB
+                data = data[..., ::-1]
+            else:
+                # BGRA -> RGBA
+                tmp = data[..., 0].copy()
+                data[..., 0] = data[..., 2]
+                data[..., 2] = tmp
         if de.stored_shape == de.shape or not resize:
             return data
 
         # sub / supersampling
         factors = [j / i for i, j in zip(de.stored_shape, de.shape)]
-        factors = [(int(round(f)) if abs(f-round(f)) < 0.0001 else f)
+        factors = [(int(round(f)) if abs(f - round(f)) < 0.0001 else f)
                    for f in factors]
 
         # use repeat if possible
@@ -837,6 +867,7 @@ class SubBlockDirectorySegment(object):
     Contains entries of any kind, currently only DirectoryEntryDV.
 
     """
+
     __slots__ = ('entries',)
 
     SID = 'ZISRAWDIRECTORY'
@@ -917,8 +948,8 @@ class AttachmentSegment(object):
 class AttachmentEntryA1(object):
     """AttachmentEntry - Schema A1."""
 
-    __slots__ = ('content_guid', 'content_file_type', 'name',
-                 'file_position', '_fh')
+    __slots__ = ('content_guid', 'content_file_type', 'name', 'file_position',
+                 '_fh')
 
     @staticmethod
     def read_file_position(fh):
@@ -1102,7 +1133,7 @@ def read_lookup_table(fh, filesize=None):
 
 
 def read_xml(fh, filesize, raw=True):
-    """Read XML from file and return as dict (default) or unicode string."""
+    """Read XML from file and return as unicode string (default) or dict."""
     xml = stripnull(fh.read(filesize))
     return unicode(xml, 'utf-8') if raw else xml2dict(xml)
 
@@ -1216,7 +1247,7 @@ def czi2tif(czifile, tiffile=None, squeeze=True, verbose=True, **kwargs):
         tiffile = None
 
     verbose('\nOpening CZI file... ', end='', flush=True)
-    start_time = time.time()
+    timer = Timer()
 
     with CziFile(czifile) as czi:
         if squeeze:
@@ -1227,22 +1258,22 @@ def czi2tif(czifile, tiffile=None, squeeze=True, verbose=True, **kwargs):
         dtype = str(czi.dtype)
         size = product(shape) * czi.dtype.itemsize
 
-        verbose('%.3f s' % (time.time() - start_time))
+        verbose('%.3f s' % timer.stop())
         verbose('Image\n  axes:  %s\n  shape: %s\n  dtype: %s\n  size:  %s'
                 % (axes, shape, dtype, format_size(size)), flush=True)
 
         if not tiffile:
             verbose('Copying image from CZI file to RAM... ',
                     end='', flush=True)
-            start_time = time.time()
+            timer.start()
             czi.asarray(order=0)
         else:
             verbose('Creating empty TIF file... ', end='', flush=True)
-            start_time = time.time()
+            timer.start()
             if 'software' not in kwargs:
                 kwargs['software'] = 'czi2tif'
             try:
-                description = str2bytes(czi.metadata(), 'utf8')
+                description = bytestr(czi.metadata(), 'utf-8')
             except Exception:
                 description = None
             metadata = kwargs.pop('metadata', {})
@@ -1250,12 +1281,40 @@ def czi2tif(czifile, tiffile=None, squeeze=True, verbose=True, **kwargs):
             data = memmap(tiffile, shape=shape, dtype=dtype, metadata=metadata,
                           description=description, **kwargs)
             data = data.reshape(czi.shape)
-            verbose('%.3f s' % (time.time() - start_time))
+            verbose('%.3f s' % timer.stop())
             verbose('Copying image from CZI to TIF file... ',
                     end='', flush=True)
-            start_time = time.time()
+            timer.start()
             czi.asarray(order=0, out=data)
-        verbose('%.3f s' % (time.time() - start_time), flush=True)
+        verbose('%.3f s' % timer.stop(), flush=True)
+
+
+def main(argv=None):
+    """Command line usage main function."""
+    if argv is None:
+        argv = sys.argv
+    if len(argv) < 2:
+        filename = askopenfilename(title='Select a CZI file', multiple=False,
+                                   filetypes=[('CZI files', '*.czi')])
+    else:
+        filename = argv[1]
+    if not filename:
+        return
+
+    timer = Timer()
+    with CziFile(filename) as czi:
+        timer.stop()
+        print(czi)
+        print()
+        timer.print('Opening file: ')
+        timer.start('Reading image:')
+        data = czi.asarray()
+        timer.print()
+
+    from matplotlib import pyplot  # NOQA: delay import
+
+    imshow(data, title=os.path.split(filename)[-1])
+    pyplot.show()
 
 
 if sys.version_info[0] == 2:
@@ -1273,11 +1332,16 @@ if sys.version_info[0] == 2:
     def str2bytes(s, encoding=None):
         """Return bytes from string."""
         return s
+
+    def bytestr(s, encoding='cp1252'):
+        """Return byte string from unicode string, else pass through."""
+        return s.encode(encoding) if isinstance(s, unicode) else s
+
 else:
     basestring = str, bytes
     print_ = print
 
-    def unicode(s, encoding='utf8'):
+    def unicode(s, encoding='utf-8'):
         """Return unicode string from bytes or unicode."""
         try:
             return str(s, encoding)
@@ -1292,8 +1356,15 @@ else:
         """Return bytes from unicode string."""
         return s.encode(encoding)
 
+    def bytestr(s, encoding='cp1252'):
+        """Return byte string from unicode string, else pass through."""
+        return s.encode(encoding) if isinstance(s, str) else s
+
 
 if __name__ == '__main__':
-    import doctest
-    numpy.set_printoptions(suppress=True, precision=5)
-    doctest.testmod()
+    if '--doctest' in sys.argv:
+        import doctest
+        numpy.set_printoptions(suppress=True, precision=5)
+        doctest.testmod()
+    else:
+        sys.exit(main(sys.argv))
