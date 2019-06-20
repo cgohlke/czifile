@@ -50,13 +50,14 @@ setup(
     install_requires=[
         'numpy>=1.11.3',
         # 'scipy>=1.1',
-        'tifffile>=2019.5.22',
+        'tifffile>=2019.6.18',
         'imagecodecs>=2019.5.22;platform_system=="Windows"'
         ],
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'czi2tif = czifile.czi2tif:main'
+            'czifile = czifile.czifile:main',
+            'czi2tif = czifile.czi2tif:main',
             ]},
     platforms=['any'],
     classifiers=[
