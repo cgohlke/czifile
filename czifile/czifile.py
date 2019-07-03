@@ -46,18 +46,20 @@ contain multidimensional images and metadata from microscopy experiments.
 
 :License: 3-clause BSD
 
-:Version: 2019.6.18
+:Version: 2019.7.2
 
 Requirements
 ------------
 * `CPython 2.7 or 3.5+ <https://www.python.org>`_
 * `Numpy 1.14 <https://www.numpy.org>`_
-* `Tifffile 2019.6.18 <https://pypi.org/project/tifffile/>`_
+* `Tifffile 2019.7.2 <https://pypi.org/project/tifffile/>`_
 * `Imagecodecs 2019.5.22 <https://pypi.org/project/imagecodecs/>`_
   (optional; used for decoding LZW, JPEG, and JPEG XR)
 
 Revisions
 ---------
+2019.7.2
+    Require tifffile 2019.7.2.
 2019.6.18
     Add package main function to view CZI files.
     Fix BGR to RGB conversion.
@@ -152,7 +154,7 @@ array([10, 10, 10], dtype=uint8)
 
 from __future__ import division, print_function
 
-__version__ = '2019.6.18'
+__version__ = '2019.7.2'
 __docformat__ = 'restructuredtext en'
 __all__ = (
     'imread',
@@ -206,7 +208,7 @@ except ImportError:
 from tifffile import (
     FileHandle, memmap, lazyattr, repeat_nd, product, stripnull, format_size,
     squeeze_axes, create_output, xml2dict, pformat, imshow, askopenfilename,
-    Timer)
+    nullfunc, Timer)
 
 
 def imread(filename, *args, **kwargs):
@@ -1239,7 +1241,7 @@ def czi2tif(czifile, tiffile=None, squeeze=True, verbose=True, **kwargs):
     StripOffsets[0]. Cast the mapped bytes to an array of 'dtype' and 'shape'.
 
     """
-    verbose = print_ if verbose else lambda *a, **b: None
+    verbose = print_ if verbose else nullfunc
 
     if tiffile is None:
         tiffile = czifile + '.tif'
@@ -1258,7 +1260,7 @@ def czi2tif(czifile, tiffile=None, squeeze=True, verbose=True, **kwargs):
         dtype = str(czi.dtype)
         size = product(shape) * czi.dtype.itemsize
 
-        verbose('%.3f s' % timer.stop())
+        verbose(timer)
         verbose('Image\n  axes:  %s\n  shape: %s\n  dtype: %s\n  size:  %s'
                 % (axes, shape, dtype, format_size(size)), flush=True)
 
@@ -1281,12 +1283,12 @@ def czi2tif(czifile, tiffile=None, squeeze=True, verbose=True, **kwargs):
             data = memmap(tiffile, shape=shape, dtype=dtype, metadata=metadata,
                           description=description, **kwargs)
             data = data.reshape(czi.shape)
-            verbose('%.3f s' % timer.stop())
+            verbose(timer)
             verbose('Copying image from CZI to TIF file... ',
                     end='', flush=True)
             timer.start()
             czi.asarray(order=0, out=data)
-        verbose('%.3f s' % timer.stop(), flush=True)
+        verbose(timer, flush=True)
 
 
 def main(argv=None):
