@@ -13,18 +13,20 @@ contain multidimensional images and metadata from microscopy experiments.
 
 :License: 3-clause BSD
 
-:Version: 2019.6.18
+:Version: 2019.7.2
 
 Requirements
 ------------
 * `CPython 2.7 or 3.5+ <https://www.python.org>`_
 * `Numpy 1.14 <https://www.numpy.org>`_
-* `Tifffile 2019.6.18 <https://pypi.org/project/tifffile/>`_
+* `Tifffile 2019.7.2 <https://pypi.org/project/tifffile/>`_
 * `Imagecodecs 2019.5.22 <https://pypi.org/project/imagecodecs/>`_
   (optional; used for decoding LZW, JPEG, and JPEG XR)
 
 Revisions
 ---------
+2019.7.2
+    Require tifffile 2019.7.2.
 2019.6.18
     Add package main function to view CZI files.
     Fix BGR to RGB conversion.
