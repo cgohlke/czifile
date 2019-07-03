@@ -50,15 +50,15 @@ setup(
     install_requires=[
         'numpy>=1.11.3',
         # 'scipy>=1.1',
-        'tifffile>=2019.6.18',
-        'imagecodecs>=2019.5.22;platform_system=="Windows"'
-        ],
+        'tifffile>=2019.7.2',
+        'imagecodecs>=2019.5.22;platform_system=="Windows"',
+    ],
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'czifile = czifile.czifile:main',
             'czi2tif = czifile.czi2tif:main',
-            ]},
+        ]},
     platforms=['any'],
     classifiers=[
         'Development Status :: 3 - Alpha',
@@ -72,5 +72,5 @@ setup(
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
-        ],
+    ],
 )
