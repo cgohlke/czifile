@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # czifile/__main__.py
 
 """Czifile package command line script."""
