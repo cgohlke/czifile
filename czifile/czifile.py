@@ -1,24 +1,22 @@
 # -*- coding: utf-8 -*-
 # czifile.py
 
-# Copyright (c) 2013-2019, Christoph Gohlke
-# Copyright (c) 2013-2019, The Regents of the University of California
-# Produced at the Laboratory for Fluorescence Dynamics.
+# Copyright (c) 2013-2025, Christoph Gohlke
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
-# * Redistributions of source code must retain the above copyright notice,
-#   this list of conditions and the following disclaimer.
+# 1. Redistributions of source code must retain the above copyright notice,
+#    this list of conditions and the following disclaimer.
 #
-# * Redistributions in binary form must reproduce the above copyright notice,
-#   this list of conditions and the following disclaimer in the documentation
-#   and/or other materials provided with the distribution.
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
 #
-# * Neither the name of the copyright holder nor the names of its
-#   contributors may be used to endorse or promote products derived from
-#   this software without specific prior written permission.
+# 3. Neither the name of the copyright holder nor the names of its
+#    contributors may be used to endorse or promote products derived from
+#    this software without specific prior written permission.
 #
 # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 # AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
@@ -32,77 +30,101 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-"""Read Carl Zeiss(r) Image (CZI) files.
+"""Read Carl Zeiss Image (CZI) files.
 
 Czifile is a Python library to read Carl Zeiss Image (CZI) files, the native
-file format of the ZEN(r) software by Carl Zeiss Microscopy GmbH. CZI files
+file format of the ZEN software by Carl Zeiss Microscopy GmbH. CZI files
 contain multidimensional images and metadata from microscopy experiments.
 
-:Author:
-  `Christoph Gohlke <https://www.lfd.uci.edu/~gohlke/>`_
-
-:Organization:
-  Laboratory for Fluorescence Dynamics. University of California, Irvine
-
-:License: 3-clause BSD
-
-:Version: 2019.7.2
+:Author: `Christoph Gohlke <https://www.cgohlke.com>`_
+:License: BSD 3-Clause
+:Version: 2019.7.2.1
 
 Requirements
 ------------
-* `CPython 2.7 or 3.5+ <https://www.python.org>`_
-* `Numpy 1.14 <https://www.numpy.org>`_
-* `Tifffile 2019.7.2 <https://pypi.org/project/tifffile/>`_
-* `Imagecodecs 2019.5.22 <https://pypi.org/project/imagecodecs/>`_
+- `CPython 2.7 or 3.5+ <https://www.python.org>`_
+- `Numpy 1.14 <https://www.numpy.org>`_
+- `Tifffile 2019.7.2 <https://pypi.org/project/tifffile/>`_
+- `Imagecodecs 2019.5.22 <https://pypi.org/project/imagecodecs/>`_
   (optional; used for decoding LZW, JPEG, and JPEG XR)
 
 Revisions
 ---------
+2019.7.2.1
+
+- Fix broken and deprecated imports.
+- Update copyright and package metadata.
+
 2019.7.2
-    Require tifffile 2019.7.2.
+
+- Require tifffile 2019.7.2.
+
 2019.6.18
-    Add package main function to view CZI files.
-    Fix BGR to RGB conversion.
-    Fix czi2tif conversion on Python 2.
+
+- Add package main function to view CZI files.
+- Fix BGR to RGB conversion.
+- Fix czi2tif conversion on Python 2.
+
 2019.5.22
-    Fix czi2tif conversion when CZI metadata contain non-ASCII characters.
-    Use imagecodecs_lite as a fallback for imagecodecs.
-    Make CziFile.metadata a function (breaking).
-    Make scipy an optional dependency; fallback on ndimage or fail on zoom().
+
+- Fix czi2tif conversion when CZI metadata contain non-ASCII characters.
+- Use imagecodecs_lite as a fallback for imagecodecs.
+- Make CziFile.metadata a function (breaking).
+- Make scipy an optional dependency; fallback on ndimage or fail on zoom().
+
 2019.1.26
-    Fix czi2tif console script.
-    Update copyright year.
+
+- Fix czi2tif console script.
+- Update copyright year.
+
 2018.10.18
-    Rename zisraw package to czifile.
+
+- Rename zisraw package to czifile.
+
 2018.8.29
-    Move czifile.py and related modules into zisraw package.
-    Move usage examples to main docstring.
-    Require imagecodecs package for decoding JpegXrFile, JpgFile, and LZW.
+
+- Move czifile.py and related modules into zisraw package.
+- Move usage examples to main docstring.
+- Require imagecodecs package for decoding JpegXrFile, JpgFile, and LZW.
+
 2018.6.18
-    Save CZI metadata to TIFF description in czi2tif.
-    Fix AttributeError using max_workers=1.
-    Make Segment.SID and DimensionEntryDV1.dimension str types.
-    Return metadata as XML unicode string or dict, not etree.
-    Return timestamps, focus positions, events, and luts as tuple or ndarray
+
+- Save CZI metadata to TIFF description in czi2tif.
+- Fix AttributeError using max_workers=1.
+- Make Segment.SID and DimensionEntryDV1.dimension str types.
+- Return metadata as XML unicode string or dict, not etree.
+- Return timestamps, focus positions, events, and luts as tuple or ndarray
+
 2017.7.21
-    Use multi-threading in CziFile.asarray to decode and copy segment data.
-    Always convert BGR to RGB. Remove bgr2rgb options.
-    Decode JpegXR directly from byte arrays.
+
+- Use multi-threading in CziFile.asarray to decode and copy segment data.
+- Always convert BGR to RGB. Remove bgr2rgb options.
+- Decode JpegXR directly from byte arrays.
+
 2017.7.13
-    Add function to convert CZI file to memory-mappable TIFF file.
+
+- Add function to convert CZI file to memory-mappable TIFF file.
+
 2017.7.11
-    Add 'out' parameter to CziFile.asarray.
-    Remove memmap option from CziFile.asarray (breaking).
-    Change spline interpolation order to 0 (breaking).
-    Make axes return a string.
-    Require tifffile 2017.7.11.
+
+- Add 'out' parameter to CziFile.asarray.
+- Remove memmap option from CziFile.asarray (breaking).
+- Change spline interpolation order to 0 (breaking).
+- Make axes return a string.
+- Require tifffile 2017.7.11.
+
 2014.10.10
-    Read data into a memory mapped array (optional).
+
+- Read data into a memory mapped array (optional).
+
 2013.12.4
-    Decode JpegXrFile and JpgFile via _czifle extension module.
-    Attempt to reconstruct tiled mosaic images.
+
+- Decode JpegXrFile and JpgFile via _czifle extension module.
+- Attempt to reconstruct tiled mosaic images.
+
 2013.11.20
-    Initial release.
+
+- Initial release.
 
 Notes
 -----
@@ -127,9 +149,9 @@ can be used for decoding LZW compressed images.
 
 Other libraries for reading CZI files (all GPL licensed):
 
-* `libCZI <https://github.com/zeiss-microscopy/libCZI>`_
-* `Python-bioformats <https://github.com/CellProfiler/python-bioformats>`_
-* `Pylibczi <https://github.com/elhuhdron/pylibczi>`_
+- `libCZI <https://github.com/zeiss-microscopy/libCZI>`_
+- `Python-bioformats <https://github.com/CellProfiler/python-bioformats>`_
+- `Pylibczi <https://github.com/elhuhdron/pylibczi>`_
 
 References
 ----------
@@ -154,9 +176,10 @@ array([10, 10, 10], dtype=uint8)
 
 from __future__ import division, print_function
 
-__version__ = '2019.7.2'
+__version__ = '2019.7.2.1'
 __docformat__ = 'restructuredtext en'
 __all__ = (
+    '__version__',
     'imread',
     'CziFile',
     'czi2tif',
@@ -190,7 +213,7 @@ import numpy
 
 try:
     # TODO: use zoom fom imagecodecs implementation when available
-    from scipy.ndimage.interpolation import zoom
+    from scipy.ndimage import zoom
 except ImportError:
     try:
         from ndimage.interpolation import zoom
@@ -206,8 +229,8 @@ except ImportError:
         imagecodecs = None
 
 from tifffile import (
-    FileHandle, memmap, lazyattr, repeat_nd, product, stripnull, format_size,
-    squeeze_axes, create_output, xml2dict, pformat, imshow, askopenfilename,
+    FileHandle, memmap, repeat_nd, product, stripnull, format_size,
+    create_output, xml2dict, pformat, imshow, askopenfilename,
     nullfunc, Timer)
 
 
@@ -220,6 +243,32 @@ def imread(filename, *args, **kwargs):
     with CziFile(filename) as czi:
         result = czi.asarray(*args, **kwargs)
     return result
+
+
+class lazyattr(object):
+    """Attribute whose value is computed on first access."""
+
+    # TODO: help() doesn't work
+    __slots__ = ('func',)
+
+    def __init__(self, func):
+        self.func = func
+        # self.__name__ = func.__name__
+        # self.__doc__ = func.__doc__
+        # self.lock = threading.RLock()
+
+    def __get__(self, instance, owner):
+        # with self.lock:
+        if instance is None:
+            return self
+        try:
+            value = self.func(instance)
+        except AttributeError as exc:
+            raise RuntimeError(exc)
+        if value is NotImplemented:
+            return getattr(super(owner, instance), self.func.__name__)
+        setattr(instance, self.func.__name__, value)
+        return value
 
 
 class CziFile(object):
@@ -1229,6 +1278,24 @@ if imagecodecs is not None:
     if hasattr(imagecodecs, 'jpeg_decode'):
         DECOMPRESS[1] = imagecodecs.jpeg_decode
         DECOMPRESS[4] = imagecodecs.jxr_decode
+
+
+def squeeze_axes(shape, axes, skip=None):
+    """Return shape and axes with single-dimensional entries removed.
+
+    Remove unused dimensions unless their axes are listed in 'skip'.
+
+    >>> squeeze_axes((5, 1, 2, 1, 1), 'TZYXC')
+    ((5, 2, 1), 'TYX')
+
+    """
+    if len(shape) != len(axes):
+        raise ValueError('dimensions of axes and shape do not match')
+    if skip is None:
+        skip = 'XY'
+    shape, axes = zip(*(i for i in zip(shape, axes)
+                        if i[0] > 1 or i[1] in skip))
+    return tuple(shape), ''.join(axes)
 
 
 def czi2tif(czifile, tiffile=None, squeeze=True, verbose=True, **kwargs):
