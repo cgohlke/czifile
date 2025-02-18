@@ -41,9 +41,15 @@ setup(
     version=version,
     description=description,
     long_description=readme,
+    long_description_content_type='text/x-rst',
     author='Christoph Gohlke',
-    author_email='cgohlke@uci.edu',
-    url='https://www.lfd.uci.edu/~gohlke/',
+    author_email='cgohlke@cgohlke.com',
+    url='https://www.cgohlke.com',
+    project_urls={
+        'Bug Tracker': 'https://github.com/cgohlke/czifile/issues',
+        'Source Code': 'https://github.com/cgohlke/czifile',
+        # 'Documentation': 'https://',
+    },
     license='BSD',
     packages=['czifile'],
     python_requires='>=2.7',
@@ -53,7 +59,6 @@ setup(
         'tifffile>=2019.7.2',
         'imagecodecs>=2019.5.22;platform_system=="Windows"',
     ],
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'czifile = czifile.czifile:main',
