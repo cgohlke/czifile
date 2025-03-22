@@ -50,7 +50,7 @@ setup(
         'Source Code': 'https://github.com/cgohlke/czifile',
         # 'Documentation': 'https://',
     },
-    license='BSD',
+    license='BSD-3-Clause',
     packages=['czifile'],
     python_requires='>=2.7',
     install_requires=[
@@ -67,7 +67,6 @@ setup(
     platforms=['any'],
     classifiers=[
         'Development Status :: 3 - Alpha',
-        'License :: OSI Approved :: BSD License',
         'Intended Audience :: Science/Research',
         'Intended Audience :: Developers',
         'Operating System :: OS Independent',
