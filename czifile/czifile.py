@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # czifile.py
 
-# Copyright (c) 2013-2025, Christoph Gohlke
+# Copyright (c) 2013-2026, Christoph Gohlke
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -37,8 +37,8 @@ file format of the ZEN software by Carl Zeiss Microscopy GmbH. CZI files
 contain multidimensional images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
-:License: BSD 3-Clause
-:Version: 2019.7.2.1
+:License: BSD-3-Clause
+:Version: 2019.7.2.2
 
 Requirements
 ------------
@@ -50,6 +50,10 @@ Requirements
 
 Revisions
 ---------
+2019.7.2.2
+
+- Replace deprecated tifffile.stripnull function.
+
 2019.7.2.1
 
 - Fix broken and deprecated imports.
@@ -176,7 +180,7 @@ array([10, 10, 10], dtype=uint8)
 
 from __future__ import division, print_function
 
-__version__ = '2019.7.2.1'
+__version__ = '2019.7.2.2'
 __docformat__ = 'restructuredtext en'
 __all__ = (
     '__version__',
@@ -229,7 +233,7 @@ except ImportError:
         imagecodecs = None
 
 from tifffile import (
-    FileHandle, memmap, repeat_nd, product, stripnull, format_size,
+    FileHandle, memmap, repeat_nd, product, format_size,
     create_output, xml2dict, pformat, imshow, askopenfilename,
     nullfunc, Timer)
 
@@ -1278,6 +1282,21 @@ if imagecodecs is not None:
     if hasattr(imagecodecs, 'jpeg_decode'):
         DECOMPRESS[1] = imagecodecs.jpeg_decode
         DECOMPRESS[4] = imagecodecs.jxr_decode
+
+
+def stripnull(string, null=b'\x00'):
+    """Return string truncated at first null character.
+
+    Clean NULL terminated C strings. For unicode strings use null='\\0'.
+
+    >>> stripnull(b'string\\x00')
+    b'string'
+    >>> stripnull('string\\x00', null='\\0')
+    'string'
+
+    """
+    i = string.find(null)
+    return string if (i < 0) else string[:i]
 
 
 def squeeze_axes(shape, axes, skip=None):
