@@ -6,8 +6,8 @@ file format of the ZEN software by Carl Zeiss Microscopy GmbH. CZI files
 contain multidimensional images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
-:License: BSD 3-Clause
-:Version: 2019.7.2.1
+:License: BSD-3-Clause
+:Version: 2019.7.2.2
 
 Requirements
 ------------
@@ -19,6 +19,10 @@ Requirements
 
 Revisions
 ---------
+2019.7.2.2
+
+- Replace deprecated tifffile.stripnull function.
+
 2019.7.2.1
 
 - Fix broken and deprecated imports.
