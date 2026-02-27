@@ -52,12 +52,12 @@ setup(
     },
     license='BSD-3-Clause',
     packages=['czifile'],
-    python_requires='>=2.7',
+    python_requires='>=3.11',
     install_requires=[
         'numpy>=1.11.3',
         # 'scipy>=1.1',
         'tifffile>=2019.7.2',
-        'imagecodecs>=2019.5.22;platform_system=="Windows"',
+        'imagecodecs>=2019.12.16;platform_system=="Windows"',
     ],
     entry_points={
         'console_scripts': [
