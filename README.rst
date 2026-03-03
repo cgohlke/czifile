@@ -7,7 +7,7 @@ contain multidimensional images and metadata from microscopy experiments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2019.7.2.2
+:Version: 2019.7.2.3
 
 Requirements
 ------------
@@ -19,6 +19,10 @@ Requirements
 
 Revisions
 ---------
+2019.7.2.3
+
+- Replace deprecated imagecodecs.jxr codec.
+
 2019.7.2.2
 
 - Replace deprecated tifffile.stripnull function.
