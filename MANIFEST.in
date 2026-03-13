@@ -1,10 +1,20 @@
 include LICENSE
 include README.rst
 include pyproject.toml
+include czifile/py.typed
 
 include zisraw.py
 include setup_zisraw.py
 include tests/*.py
+
+exclude .env
+exclude *.cmd
+exclude *.yaml
+exclude mypy.ini
+exclude ruff.toml
+recursive-exclude doc *
+recursive-exclude docs *
+recursive-exclude test *
 
 recursive-exclude * __pycache__
 recursive-exclude * *.py[co]
