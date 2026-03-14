@@ -29,7 +29,7 @@
 
 """Unittests for the czifile package.
 
-:Version: 2026.3.12
+:Version: 2026.3.14
 
 """
 
@@ -41,11 +41,15 @@ import os
 import pathlib
 import sys
 import sysconfig
+import warnings
 from collections.abc import Mapping
 
 import numpy
 import pytest
 import tifffile
+
+# NOTE: ``assert numpy.array_equal`` much faster than ``assert_array_equal``
+# from numpy.testing import assert_array_equal
 
 try:
     import fsspec
@@ -86,6 +90,12 @@ DATA = HERE / 'data'
 
 # Maximum size of image arrays to read in glob tests
 MAX_SIZE = int(os.environ.get('CZIFILE_MAX_SIZE', '512')) * 1024 * 1024
+
+
+def config() -> str:
+    """Return test configuration summary."""
+    items = [f'MAX_SIZE={MAX_SIZE // (1024 * 1024)}MB']
+    return ', '.join(items)
 
 
 @pytest.mark.skipif(__doc__ is None, reason='__doc__ is None')
@@ -406,7 +416,7 @@ def test_imread():
     assert im.shape == (181, 312)
 
 
-def test_imread_default_scene():
+def test_imread_scene_default():
     """Test imread reads first scene by default."""
     # PupalWing.czi has a single scene at S=4 (not S=0).
 
@@ -426,6 +436,44 @@ def test_imread_default_scene():
 
     with pytest.raises(KeyError, match='scene -1 not found'):
         imread(filename, scene=-1)
+
+    # slice(4, 5) selects S-coords in {4} -> same result as scene=4
+    im_slice = imread(filename, scene=slice(4, 5))
+    assert numpy.array_equal(im_slice, im)
+
+    # slice(4, 10) covers S in {4..9} -> S=4 is included; same result
+    im_wide = imread(filename, scene=slice(4, 10))
+    assert numpy.array_equal(im_wide, im)
+
+    # slice(0, 4) covers S in {0,1,2,3} -> file has no such scene
+    with pytest.raises(KeyError):
+        imread(filename, scene=slice(0, 4))
+
+
+def test_imread_scene_sequence():
+    """Test imread and CziFile.asarray accept a sequence of scene indices."""
+    filename = DATA / 'Zenodo-7015307/S=3_1Pos_2Mosaic_T=2=Z=3_CH=2.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        # single-item sequence is equivalent to scalar scene selection
+        im_list1 = czi.asarray(scene=[1])
+        im_scalar1 = czi.asarray(scene=1)
+        assert im_list1.shape == im_scalar1.shape
+        assert numpy.array_equal(im_list1, im_scalar1)
+
+        # two-scene sequence merges scenes 0 and 1 into one bounding box
+        im_01 = czi.asarray(scene=[0, 1])
+        assert im_01.shape == (2, 2, 3, 1109, 1760)
+
+        # result equals what czi.scenes(scene=[0, 1]) returns
+        ref_01 = czi.scenes(scene=[0, 1]).asarray()
+        assert numpy.array_equal(im_01, ref_01)
+
+    # also reachable via imread()
+    im_imread = imread(filename, scene=[0, 1])
+    assert numpy.array_equal(im_imread, im_01)
 
 
 def test_czi():
@@ -678,6 +726,7 @@ def test_czi():
         assert img_c0.sizes == {'Z': 22, 'Y': 181, 'X': 312}
         assert len(img_c0.planes) == 22
 
+        # slice selects by absolute Z coordinate range
         img_z = img(Z=slice(0, 5))
         assert img_z.sizes['Z'] == 5
         assert len(img_z.planes) == 3 * 5
@@ -966,6 +1015,12 @@ def test_palm_superresolution():
         if ome_path.exists():
             expected = tifffile.imread(ome_path).astype(numpy.uint16)
             assert numpy.array_equal(arr, expected)
+        # planes interface must match asarray: _read_plane must downsample
+        # the stored 1206x1206 tile to the logical 512x512 output
+        plane = image.planes[0]
+        assert plane.shape == (512, 512)
+        assert plane.dtype == numpy.uint16
+        assert numpy.array_equal(plane, arr)
 
 
 def test_palm_drift():
@@ -1002,6 +1057,17 @@ def test_palm_drift():
         if ome_path.exists():
             expected = tifffile.imread(str(ome_path)).astype(numpy.uint16)
             assert numpy.array_equal(arr, expected)
+        # planes interface must match asarray for both tiles:
+        # C=0 is stored at full res (256x256), C=1 must be downsampled
+        # from stored 2560x2560 to logical 256x256
+        plane_c0 = image(C=0).planes[0]
+        assert plane_c0.shape == (256, 256)
+        assert plane_c0.dtype == numpy.uint16
+        assert numpy.array_equal(plane_c0, arr[0])
+        plane_c1 = image(C=1).planes[0]
+        assert plane_c1.shape == (256, 256)
+        assert plane_c1.dtype == numpy.uint16
+        assert numpy.array_equal(plane_c1, arr[1])
 
 
 def test_timestamps():
@@ -1756,7 +1822,7 @@ def test_pyramid_roi():
         expected = full[:, sy : sy + sh, sx : sx + sw]
 
         assert roi_arr.shape == expected.shape
-        numpy.testing.assert_array_equal(roi_arr, expected)
+        assert numpy.array_equal(roi_arr, expected)
 
 
 def test_mixed_dimension_sets():
@@ -2170,12 +2236,12 @@ def test_spectral_lsm800_chs():
 
 
 def test_airyscan_timestamps():
-    """Test AiryScan fast-scan file with zero t_incr uses TimeStamps."""
+    """Test Airyscan fast-scan file with zero t_incr uses TimeStamps."""
     # AiryFastScan.czi has Interval/TimeSpan/Value == '0' in the XML metadata,
     # so the computed time increment is zero.  coords['T'] must fall back to
     # the TimeStamps attachment (8200 entries) rather than returning all zeros.
 
-    filename = DATA / 'AiryScan/AiryFastScan.czi'
+    filename = DATA / 'Airyscan/AiryFastScan.czi'
     if not filename.exists():
         pytest.skip(f'{filename!r} not found')
 
@@ -2201,20 +2267,20 @@ def test_airyscan_timestamps():
         assert ct[-1] == pytest.approx(ts[-1], rel=1e-9)
         assert numpy.all(numpy.diff(ct) > 0)
 
-        # coords['H'] - AiryScan detector elements get integer indices
+        # coords['H'] - Airyscan detector elements get integer indices
         ch = img.coords['H']
         assert ch.dtype == numpy.uint8
         assert list(ch) == list(range(16))
 
 
 def test_airyscan_fastscan():
-    """Test AiryScan fast-scan Y-upsampling via numpy.repeat."""
+    """Test Airyscan fast-scan Y-upsampling via numpy.repeat."""
     # AiryFastScan.czi stores C=0 tiles with Y compressed 4x (stored_Y=32,
     # logical_Y=128).  asarray() must upsample them with numpy.repeat so that
     # the output array is fully populated at the logical 128-row size.
     # C=1 tiles are full-resolution and require no special handling.
 
-    filename = DATA / 'AiryScan/AiryFastScan.czi'
+    filename = DATA / 'Airyscan/AiryFastScan.czi'
     if not filename.exists():
         pytest.skip(f'{filename!r} not found')
 
@@ -2229,16 +2295,32 @@ def test_airyscan_fastscan():
         # read a single H=0, T=0 plane (both channels) to keep I/O small
         frame = img(H=0, T=0).asarray()
 
-    assert frame.shape == (2, 128, 128)
-    assert frame.dtype == numpy.dtype('uint8')
-    # C=0: stored 32 rows, upsampled to 128 - data must reach row 32+
-    assert int((frame[0, 32:] != 0).sum()) > 0
-    # each group of 4 consecutive rows must be identical (repeat pattern)
-    for base in range(0, 128, 4):
-        assert numpy.array_equal(frame[0, base], frame[0, base + 1])
-        assert numpy.array_equal(frame[0, base], frame[0, base + 3])
-    # C=1 is full-resolution (128 rows stored); no special handling needed
-    assert frame[1].shape == (128, 128)
+        assert frame.shape == (2, 128, 128)
+        assert frame.dtype == numpy.dtype('uint8')
+        # C=0: stored 32 rows, upsampled to 128 - data must reach row 32+
+        assert int((frame[0, 32:] != 0).sum()) > 0
+        # each group of 4 consecutive rows must be identical (repeat pattern)
+        for base in range(0, 128, 4):
+            assert numpy.array_equal(frame[0, base], frame[0, base + 1])
+            assert numpy.array_equal(frame[0, base], frame[0, base + 3])
+        # C=1 is full-resolution (128 rows stored); no special handling needed
+        assert frame[1].shape == (128, 128)
+
+        # planes interface must produce same result as asarray for upsampled
+        # tiles: _read_plane must upsample C=0 stored_Y=32 -> logical_Y=128
+        # all three non-spatial dims are pinned in one __call__ to avoid
+        # chaining, which is not permitted
+        plane_c0 = img(H=0, T=0, C=0).planes[0]
+        assert plane_c0.shape == (128, 128)
+        assert int((plane_c0[32:] != 0).sum()) > 0
+        for base in range(0, 128, 4):
+            assert numpy.array_equal(plane_c0[base], plane_c0[base + 1])
+            assert numpy.array_equal(plane_c0[base], plane_c0[base + 3])
+        plane_c1 = img(H=0, T=0, C=1).planes[0]
+        assert plane_c1.shape == (128, 128)
+        # planes result matches asarray result
+        assert numpy.array_equal(plane_c0, frame[0])
+        assert numpy.array_equal(plane_c1, frame[1])
 
 
 def test_multiscene_mosaic():
@@ -2359,7 +2441,7 @@ def test_multiscene_mosaic():
                     i - j for i, j in zip(index, img_sel.start, strict=False)
                 )
             ] = plane
-        numpy.testing.assert_array_equal(assembled, img_sel.asarray())
+        assert numpy.array_equal(assembled, img_sel.asarray())
 
         # planes(maxworkers=N) parallelises tile compositing per plane;
         # results must match the sequential reference
@@ -2370,7 +2452,7 @@ def test_multiscene_mosaic():
                     i - j for i, j in zip(index, img_sel.start, strict=False)
                 )
             ] = plane
-        numpy.testing.assert_array_equal(assembled_mt, img_sel.asarray())
+        assert numpy.array_equal(assembled_mt, img_sel.asarray())
 
         # single-value Z selection squeezes that dimension out
         sub_z1 = sc1(Z=1)
@@ -2385,7 +2467,7 @@ def test_multiscene_mosaic():
         )
         assert list(sub_z1.coords['C']) == ['DAPI', 'EGFP']
 
-        # slice selection keeps the dimension with the requested range
+        # slice selects by absolute Z coordinate range (Z in [1, 3))
         sub_zsl = sc1(Z=slice(1, 3))
         assert sub_zsl.dims == ('T', 'C', 'Z', 'Y', 'X')
         assert sub_zsl.shape == (2, 2, 2, 256, 256)
@@ -2414,8 +2496,8 @@ def test_multiscene_mosaic():
         # coord keys follow the reordered dim order
         assert list(sub_ct.coords.keys())[:3] == ['Z', 'C', 'T']
 
-        # scalar Z and single-element Z slice both squeeze the dim out and
-        # produce identical pixel data
+        # scalar Z and single-element Z slice (Z=0) both squeeze Z out
+        # and produce identical pixel data; slice is absolute coordinate
         sub_z0 = sc1(Z=0)
         sub_z0sl = sc1(Z=slice(0, 1))
         assert sub_z0.dims == ('T', 'C', 'Y', 'X')
@@ -2549,13 +2631,15 @@ def test_gil_enabled():
     ],
 )
 def test_glob(filename):
-    """Test read all CZI files."""
+    """Test read all CZI files and warn about unusual files."""
     if 'defective' in filename:
         pytest.xfail(reason='file is marked defective')
     filename = DATA / filename
     with CziFile(filename) as czi:
         str(czi)
         _ = czi.header
+        if czi.header.update_pending:
+            pytest.xfail(reason='file header update_pending')
         _ = czi.metadata()
         _ = czi.subblock_directory
         _ = czi.filtered_subblock_directory
@@ -2565,6 +2649,16 @@ def test_glob(filename):
         next(czi.segments(), None)
         next(czi.subblocks(), None)
         next(czi.attachments(), None)
+
+        scene_keys = list(czi.scenes.keys())
+        if len(scene_keys) > 1:
+            expected = list(range(scene_keys[0], scene_keys[-1] + 1))
+            if scene_keys != expected:
+                warnings.warn(
+                    f'non-consecutive scene indices {scene_keys!r}',
+                    stacklevel=2,
+                )
+
         for image in czi.scenes.values():
             for level in image.levels:
                 if not level.directory_entries:
@@ -2575,10 +2669,31 @@ def test_glob(filename):
                 _ = level.directory_entries
                 _ = level.channels
 
-                if (
-                    level.nbytes < MAX_SIZE
-                    and not 100 <= level.compression <= 999
+                if level.compression in (
+                    CziCompressionType.JPEG,
+                    CziCompressionType.JPEGLL,
+                    CziCompressionType.LZW,
+                    CziCompressionType.UNKNOWN,
                 ):
+                    warnings.warn(
+                        f'unsupported {level.compression!r}', stacklevel=2
+                    )
+                    continue
+                if 100 <= int(level.compression) <= 999:
+                    warnings.warn(
+                        f'unsupported {level.compression!r}', stacklevel=2
+                    )
+                    continue
+                if int(level.compression) >= 1000:
+                    warnings.warn(
+                        f'unsupported {level.compression!r}', stacklevel=2
+                    )
+                    continue
+                if level.pixeltype == CziPixelType.UNKNOWN:
+                    warnings.warn(f'unknown {level.pixeltype!r}', stacklevel=2)
+                    continue
+
+                if level.nbytes < MAX_SIZE:
                     arr = level.asarray()
                     assert arr.nbytes == level.nbytes
                     assert arr.dtype == level.dtype
@@ -2592,15 +2707,9 @@ def test_glob(filename):
                     rx, ry = e0.start[x_i], e0.start[y_i]
                     rw = min(e0.shape[x_i], 512)
                     rh = min(e0.shape[y_i], 512)
-                    try:
-                        level(roi=(rx, ry, rw, rh)).planes[0]
-                    except ValueError:
-                        pass  # unsupported compression
+                    level(roi=(rx, ry, rw, rh)).planes[0]
                 else:
-                    try:
-                        planes[0]
-                    except ValueError:
-                        pass  # unsupported compression
+                    planes[0]
 
 
 @pytest.mark.parametrize(
@@ -2693,7 +2802,7 @@ def test_glob_vs_pylibczirw(filename):
             #   - scenes larger than MAX_SIZE
             #   - lossy compressions where decoders may legitimately differ
             #   - scenes missing spatial Y/X axes (line/point scans)
-            #   - scenes with non-T/C/Z non-spatial dims (e.g. AiryScan H)
+            #   - scenes with non-T/C/Z non-spatial dims (e.g. Airyscan H)
             #     that pylibCZIrw does not model
             # pylibCZIrw supports only these pixel types for read()
             _plib_ptypes = {
@@ -2810,6 +2919,233 @@ def pylibczirw_read_scene(czidoc, image, scene, has_scenes):
         # pylibCZIrw returns BGRA; czifile converts BGRA -> RGBA
         arr = arr[..., [2, 1, 0, 3]].copy()
     return arr
+
+
+def test_storedsize_regular():
+    """Test storedsize on regular file with no resampling."""
+    filename = DATA / 'Test.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = czi.scenes[0]
+        assert img.is_upsampled is False
+        assert img.is_downsampled is False
+        assert img.storedsize is False
+
+        ss = img(storedsize=True)
+        assert ss.storedsize is True
+        assert ss.is_upsampled is False
+        assert ss.is_downsampled is False
+        assert ss.is_pyramid_level is False
+        # shape unchanged: stored_shape == shape for all entries
+        assert ss.shape == img.shape
+        assert ss.dims == img.dims
+
+        arr = ss.asarray()
+        assert arr.shape == img.shape
+        # data must be identical to non-storedsize read
+        expected = img.asarray()
+        assert numpy.array_equal(arr, expected)
+
+        # planes interface: same shape, same data
+        plane_ss = ss.planes[0]
+        plane_normal = img.planes[0]
+        assert plane_ss.shape == plane_normal.shape
+        assert numpy.array_equal(plane_ss, plane_normal)
+
+        # repr includes storedsize indicator
+        assert 'storedsize' in repr(ss)
+        assert 'storedsize' not in repr(img)
+
+
+def test_storedsize_airyscan():
+    """Test storedsize on Airyscan file skips Y-upsampling."""
+    filename = DATA / 'Airyscan/AiryFastScan.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = czi.scenes[0]
+        assert img.is_upsampled is True
+
+        # C=0 is sub-sampled (stored_Y=32, logical_Y=128).
+        # storedsize=True returns stored 32-row data without repeat.
+        c0_ss = img(H=0, T=0, C=0, storedsize=True)
+        assert c0_ss.storedsize is True
+        assert c0_ss.is_upsampled is True
+        assert c0_ss.is_downsampled is False
+        assert c0_ss.shape == (32, 128)
+        arr_c0 = c0_ss.asarray()
+        assert arr_c0.shape == (32, 128)
+
+        # planes interface returns stored size too
+        plane_c0 = c0_ss.planes[0]
+        assert plane_c0.shape == (32, 128)
+        assert numpy.array_equal(plane_c0, arr_c0)
+
+        # C=1 is full-resolution (128x128 stored).
+        # storedsize does not change output shape.
+        c1_ss = img(H=0, T=0, C=1, storedsize=True)
+        assert c1_ss.is_upsampled is False
+        assert c1_ss.is_downsampled is False
+        assert c1_ss.shape == (128, 128)
+        c1_normal = img(H=0, T=0, C=1)
+        assert numpy.array_equal(c1_ss.asarray(), c1_normal.asarray())
+
+
+def test_storedsize_airyscan_mixed_valueerror():
+    """Test storedsize raises ValueError for mixed Airyscan channels."""
+    filename = DATA / 'Airyscan/AiryFastScan.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = czi.scenes[0]
+        # both channels together have mixed stored-to-logical ratios
+        mixed = img(H=0, T=0, storedsize=True)
+        with pytest.raises(ValueError, match='uniform stored-to-logical'):
+            mixed.shape  # noqa: B018
+
+
+def test_storedsize_palm():
+    """Test storedsize on PALM file returns stored super-resolution data."""
+    filename = DATA / 'Zenodo-10577621/Image 5_PALM_verrechnet.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = czi.scenes[0]
+        assert img.is_downsampled is True
+        assert img.shape == (512, 512)
+
+        ss = img(storedsize=True)
+        assert ss.storedsize is True
+        assert ss.is_upsampled is False
+        assert ss.is_downsampled is True
+        assert ss.is_pyramid_level is False
+        # stored size is 1206x1206 (larger than logical 512x512)
+        assert ss.shape == (1206, 1206)
+
+        arr = ss.asarray()
+        assert arr.shape == (1206, 1206)
+        assert arr.dtype == numpy.uint16
+
+        # planes interface returns stored size too
+        plane = ss.planes[0]
+        assert plane.shape == (1206, 1206)
+        assert numpy.array_equal(plane, arr)
+
+
+def test_storedsize_palm_mixed_valueerror():
+    """Test storedsize raises ValueError for mixed PALM channels."""
+    filename = DATA / 'Zenodo-10577621/Palm_mitDrift.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = czi.scenes[0]
+        assert img.is_downsampled is True
+        # mixed ratios: C=0 is super-res, C=1 is normal
+        mixed = img(storedsize=True)
+        with pytest.raises(ValueError, match='uniform stored-to-logical'):
+            mixed.shape  # noqa: B018
+
+
+def test_storedsize_palm_per_channel():
+    """Test storedsize on PALM file with per-channel selection."""
+    filename = DATA / 'Zenodo-10577621/Palm_mitDrift.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = czi.scenes[0]
+        # C=0 is super-resolution (stored 2560x2560 -> logical 256x256)
+        c0 = img(C=0, storedsize=True)
+        assert c0.is_downsampled is True
+        assert c0.is_upsampled is False
+        assert c0.shape == (2560, 2560)
+        arr_c0 = c0.asarray()
+        assert arr_c0.shape == (2560, 2560)
+
+        # C=1 is normal (stored 256x256 == logical 256x256)
+        c1 = img(C=1, storedsize=True)
+        assert c1.is_downsampled is False
+        assert c1.is_upsampled is False
+        assert c1.shape == (256, 256)
+        arr_c1 = c1.asarray()
+        assert arr_c1.shape == (256, 256)
+        # no-op: data same as without storedsize
+        assert numpy.array_equal(arr_c1, img(C=1).asarray())
+
+
+def test_storedsize_pyramid():
+    """Test storedsize on pyramid file is no-op."""
+    filename = DATA / 'CZI-samples/Axio Scan.Z1/Kidney_40x_z_stack.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = czi.scenes[0]
+        assert img.is_pyramid
+
+        # base level: storedsize flag set but shape unchanged
+        ss = img(storedsize=True)
+        assert ss.storedsize is True
+        assert ss.is_upsampled is False
+        assert ss.is_downsampled is False
+        assert ss.is_pyramid_level is False
+        assert ss.shape == img.shape
+
+        # pyramid level: storedsize flag set but shape unchanged
+        lv7 = img.levels[7]
+        lv7_ss = lv7(storedsize=True)
+        assert lv7_ss.storedsize is True
+        assert lv7_ss.is_pyramid_level is True
+        assert lv7_ss.is_upsampled is False
+        assert lv7_ss.is_downsampled is False
+        assert lv7_ss.shape == lv7.shape
+        arr_ss = lv7_ss.asarray()
+        arr_normal = lv7.asarray()
+        assert numpy.array_equal(arr_ss, arr_normal)
+
+
+def test_storedsize_inheritance():
+    """Test storedsize=None inherits from parent image."""
+    filename = DATA / 'Zenodo-10577621/Image 5_PALM_verrechnet.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = czi.scenes[0]
+        assert img.storedsize is False
+
+        # explicit True
+        ss = img(storedsize=True)
+        assert ss.storedsize is True
+
+        # explicit False overrides
+        no_ss = ss(storedsize=False)
+        assert no_ss.storedsize is False
+        assert no_ss.shape == (512, 512)
+
+        # default None inherits True from parent
+        child = ss(storedsize=None)
+        assert child.storedsize is True
+        assert child.shape == (1206, 1206)
+
+
+def test_storedsize_imread():
+    """Test imread passes storedsize parameter through."""
+    filename = DATA / 'Zenodo-10577621/Image 5_PALM_verrechnet.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    arr = imread(filename, storedsize=True)
+    assert arr.shape == (1206, 1206)
+
+    arr_normal = imread(filename)
+    assert arr_normal.shape == (512, 512)
 
 
 if __name__ == '__main__':
