@@ -4,13 +4,26 @@
 Read Carl Zeiss image files (CZI)
 =================================
 
-Czifile is a Python library to read Carl Zeiss Image (CZI) files, the native
-file format of the ZEN(r) software by Carl Zeiss Microscopy GmbH. CZI files
-contain multidimensional images and metadata from microscopy experiments.
+Czifile is a Python library for reading image data and metadata from
+Carl Zeiss Image (CZI) files, the native file format of ZEN by
+Carl Zeiss Microscopy GmbH.
+
+- Pure-Python implementation under BSD-3-Clause license.
+- Single-call array access to scenes and spatial ROIs.
+- Xarray DataArray output with physical axis coordinates.
+- Multi-scene merging into a single array.
+- Per-dimension selection with integer, slice, and list indexing.
+- Plane-by-plane iterator.
+- Pyramid-level access for multi-resolution images.
+- Tile upsampling (Fast Airyscan), downsampling (PALM), and stitching
+  (single-point FCS) with optional stored-resolution output.
+- Support for compression schemes (Zstd and JPEG XR) and
+  pixel type promotion across channels.
+- Direct access to every ZISRAW segment and file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.3.12
+:Version: 2026.3.14
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -34,7 +47,7 @@ This revision was tested with the following requirements and dependencies
 
 - `CPython <https://www.python.org>`_ 3.12.10, 3.13.12, 3.14.3 64-bit
 - `NumPy <https://pypi.org/project/numpy>`_ 2.4.2
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2025.3.30
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.3.6
   (required for decoding LZW, JPEG XR, Zstd, etc.)
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
@@ -43,12 +56,21 @@ This revision was tested with the following requirements and dependencies
 Revisions
 ---------
 
+2026.3.14
+
+- Add storedsize option to return pixel data at stored resolution.
+- Allow sequence and slice of scene indices in imread and asarray/asxarray.
+- Interpret dimension slice selection as absolute coordinates.
+- Fix CziImagePlanes not upsampling Airyscan fast-scan tiles.
+- Fix CziImagePlanes not downsampling PALM super-resolution tiles.
+- Add command line options to select dimensions.
+
 2026.3.12
 
 - Rewrite with many breaking changes.
 - Support Zstd compression schemes.
 - Support reading subblock masks.
-- Add CziFile.scene interface.
+- Add CziFile.scenes interface.
 - Add pyramid level access via CziImage.levels.
 - Add option to read subset of image data.
 - Add option to iterate over image planes in any dimension order.
@@ -107,23 +129,6 @@ Other libraries for reading CZI files (all GPL or LGPL licensed):
 `bio-formats <https://github.com/ome/bioformats>`_,
 `libCZI <https://github.com/zeiss-microscopy/libCZI>`__ (deprecated), and
 `pylibczi <https://github.com/elhuhdron/pylibczi>`__ (deprecated).
-
-Compared to pylibCZIrw, which wraps the C++ libczi library under LGPL,
-czifile is a pure-Python, permissively BSD-licensed reader.
-Czifile provides direct access to every ZISRAW segment (raw subblock bytes,
-per-subblock XML metadata, and subblock binary attachments), full decoding
-of all file-level attachment types (TimeStamps, EventList, LookupTables,
-FocusPositions, embedded thumbnails, and recursive CZI files),
-correct AiryScan fast-scan upsampling, correct stitching of single-point
-time-series/sFCS subblocks along T, explicit pyramid-level objects,
-flexible per-dimension selection and reordering, efficient single-call
-multi-dimensional array access to scenes and spatial ROIs,
-and ``xarray.DataArray`` output with physical axis coordinates
-(spatial, temporal, and spectral).
-pylibCZIrw's main advantages are writing CZI files, a configurable
-subblock cache, fractional-zoom pyramid access, resource efficiency,
-and lower per-call overhead for single-subblock reads (however,
-with multiple threads, czifile may match or exceed pylibCZIrw throughput).
 
 References
 ----------
@@ -193,6 +198,7 @@ Iterate individual Y/X planes:
 
 .. code-block:: python
 
+    >>> import numpy
     >>> with CziFile('Example.czi') as czi:
     ...     img = czi.scenes[0]
     ...
@@ -215,7 +221,7 @@ Iterate individual Y/X planes:
     ...     out = numpy.empty(sel.shape, sel.dtype)
     ...     for coords, plane in sel.planes.items():
     ...         out[tuple(i - j for i, j in zip(coords, sel.start))] = plane
-    ...     assert_array_equal(out, sel.asarray())
+    ...     assert numpy.array_equal(out, sel.asarray())
     ...
     ...     # indexed access: pass the same absolute coordinate values
     ...     # that .planes.items() / .planes.keys() returns
