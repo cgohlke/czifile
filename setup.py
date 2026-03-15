@@ -32,7 +32,7 @@ def fix_docstring_examples(docstring: str) -> str:
                 lines.extend(['.. code-block:: python', ''])
                 start = False
         lines.append(('    ' if indent else '') + line)
-    return '\n'.join(lines)
+    return '\n'.join(lines) + '\n'
 
 
 with open('czifile/czifile.py', encoding='utf-8') as fh:
@@ -54,7 +54,7 @@ readme = '\n'.join(
 if 'sdist' in sys.argv:
     # update README, LICENSE, and CHANGES files
 
-    with open('README.rst', 'w', encoding='utf-8') as fh:
+    with open('README.rst', 'w', encoding='utf-8', newline='\n') as fh:
         fh.write(fix_docstring_examples(readme))
 
     license = search(
@@ -64,7 +64,7 @@ if 'sdist' in sys.argv:
     )
     license = license.replace('# ', '').replace('#', '')
 
-    with open('LICENSE', 'w', encoding='utf-8') as fh:
+    with open('LICENSE', 'w', encoding='utf-8', newline='\n') as fh:
         fh.write('BSD-3-Clause license\n\n')
         fh.write(license)
 
@@ -78,8 +78,8 @@ if 'sdist' in sys.argv:
         old = fh.read()
 
     old = old.split(revisions.splitlines()[-1])[-1]
-    with open('CHANGES.rst', 'w', encoding='utf-8') as fh:
-        fh.write(revisions.strip())
+    with open('CHANGES.rst', 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write(revisions.replace('---------', '=========').strip())
         fh.write(old)
 
 setup(
