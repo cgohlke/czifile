@@ -35,22 +35,19 @@ Czifile is a Python library for reading image data and metadata from
 Carl Zeiss Image (CZI) files, the native file format of ZEN by
 Carl Zeiss Microscopy GmbH.
 
-- Pure-Python implementation under BSD-3-Clause license.
-- Single-call array access to scenes and spatial ROIs.
-- Xarray DataArray output with physical axis coordinates.
-- Multi-scene merging into a single array.
-- Per-dimension selection with integer, slice, and list indexing.
-- Plane-by-plane iterator.
-- Pyramid-level access for multi-resolution images.
-- Tile upsampling (Fast Airyscan), downsampling (PALM), and stitching
-  (single-point FCS) with optional stored-resolution output.
-- Support for compression schemes (Zstd and JPEG XR) and
-  pixel type promotion across channels.
-- Direct access to every ZISRAW segment and file-level attachments.
+Czifile is a pure-Python library under the BSD-3-Clause license. It provides
+single-call array access to scenes and spatial ROIs, xarray DataArray output
+with physical axis coordinates, multi-scene merging, per-dimension selection
+by integer, slice, or sequence, chunk-based iteration, and pyramid-level
+access. It handles Fast Airyscan upsampling and PALM downsampling with
+optional stored-resolution output, and assembles FCS and line-scan files from
+T-chunked subblocks. It also supports Zstd and JPEG XR compression, pixel type
+promotion across channels, and direct access to all ZISRAW segments and
+file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.3.14
+:Version: 2026.3.15
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -73,9 +70,8 @@ This revision was tested with the following requirements and dependencies
 (other versions may work):
 
 - `CPython <https://www.python.org>`_ 3.12.10, 3.13.12, 3.14.3 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.2
+- `NumPy <https://pypi.org/project/numpy>`_ 2.4.3
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.3.6
-  (required for decoding LZW, JPEG XR, Zstd, etc.)
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
 - `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.3.3 (optional)
@@ -83,13 +79,21 @@ This revision was tested with the following requirements and dependencies
 Revisions
 ---------
 
+2026.3.15
+
+- Replace CziImagePlanes with CziImageChunks (breaking).
+- Add CziImage.chunks method for flexible chunk-based iteration.
+- Add CziFile.metadata_segment property.
+- Add offset properties to CziAttachmentEntryA1 and subblock entry classes.
+- Add CziSegmentId.packed property returning the 16-byte on-disk field.
+- Manage update_pending flag in CziFile context manager for writable handles.
+- Improve documentation.
+
 2026.3.14
 
-- Add storedsize option to return pixel data at stored resolution.
+- Add option to return pixel data at stored resolution.
 - Allow sequence and slice of scene indices in imread and asarray/asxarray.
 - Interpret dimension slice selection as absolute coordinates.
-- Fix CziImagePlanes not upsampling Airyscan fast-scan tiles.
-- Fix CziImagePlanes not downsampling PALM super-resolution tiles.
 - Add command line options to select dimensions.
 
 2026.3.12
@@ -137,7 +141,7 @@ Python 32-bit versions are deprecated. Python < 3.12 are no longer supported.
 
 "ZEISS" and "Carl Zeiss" are registered trademarks of Carl Zeiss AG.
 
-The ZISRAW file format design specification [1] is confidential and the
+The ZISRAW file format design specification [1]_ is confidential and the
 license agreement does not permit to write data into CZI files.
 
 Only a subset of the 2016 specification is implemented. Specifically,
@@ -160,17 +164,17 @@ Other libraries for reading CZI files (all GPL or LGPL licensed):
 References
 ----------
 
-1. ZISRAW (CZI) File Format Design Specification Release Version 1.2.2.
-   "CZI 07-2016/CZI-DOC ZEN 2.3/DS_ZISRAW-FileFormat.pdf" (confidential).
+.. [1] ZISRAW (CZI) File Format Design Specification Release Version 1.2.2.
+       "CZI 07-2016/CZI-DOC ZEN 2.3/DS_ZISRAW-FileFormat.pdf" (confidential).
 
 Examples
 --------
 
 Read image data of the first scene from a CZI file as numpy array:
 
->>> image = imread('Example.czi')
->>> assert image.shape == (2, 2, 3, 486, 1178)
->>> assert image.dtype == 'uint16'
+>>> arr = imread('Example.czi')
+>>> assert arr.shape == (2, 2, 3, 486, 1178)
+>>> assert arr.dtype == 'uint16'
 
 Access scenes, shape, and metadata:
 
@@ -215,37 +219,33 @@ Select dimensions and read as numpy array:
 ...     assert padded.shape == (2, 3, 2048, 2048)  # 'T', 'Z', 'Y', 'X'
 ...
 
-Iterate individual Y/X planes:
+Iterate image chunks:
 
->>> import numpy
 >>> with CziFile('Example.czi') as czi:
 ...     img = czi.scenes[0]
 ...
-...     # img has non-spatial dims T, C, Z
-...     # unspecified dims (T) come first, then kwargs order (C, Z)
-...     # iterates T-outer, C-middle, Z-inner
-...     for plane in img(C=None, Z=None).planes:
-...         assert plane.shape == (486, 1178)
+...     # iterate individual Y/X planes as CziImage views
+...     # by default, all non-spatial dims are iterated one-at-a-time
+...     for chunk in img.chunks():
+...         assert isinstance(chunk, CziImage)
+...         assert chunk.asarray().shape == (486, 1178)
 ...
-...     # iterate with absolute coordinate values
-...     for coords, plane in img(C=None, Z=None).planes.items():
-...         assert plane.shape == (486, 1178)
-...         assert len(coords) == 3  # (t_coord, c_coord, z_coord)
+...     # keep C in each chunk: iterate T and Z only
+...     for chunk in img.chunks(C=None):
+...         assert chunk.asarray().shape == (2, 486, 1178)
 ...
-...     # assemble a full array plane-by-plane (equivalent to asarray(),
-...     # but much slower - use asarray() for bulk reads):
-...     # spatial dims are always last, so zip truncates at len(coords),
-...     # skipping Y/X from sel.start and converting to 0-based positions.
-...     sel = img(C=None, Z=None)
-...     out = numpy.empty(sel.shape, sel.dtype)
-...     for coords, plane in sel.planes.items():
-...         out[tuple(i - j for i, j in zip(coords, sel.start))] = plane
-...     assert numpy.array_equal(out, sel.asarray())
+...     # batch Z into groups of 3; last chunk may be smaller if Z indivisible
+...     for chunk in img.chunks(Z=3):
+...         assert chunk.sizes['Z'] <= 3
 ...
-...     # indexed access: pass the same absolute coordinate values
-...     # that .planes.items() / .planes.keys() returns
-...     plane = img(C=None, Z=None).planes[0, 0, 0]  # T=0, C=0, Z=0
-...     assert plane.shape == (486, 1178)
+...     # spatial tiling: iterate T x C x Z x grid
+...     for chunk in img.chunks(Y=256, X=256):
+...         assert chunk.shape[-2] <= 256
+...         assert chunk.shape[-1] <= 256
+...
+...     # keep C, tile spatially
+...     for chunk in img.chunks(C=None, Y=256, X=256):
+...         assert chunk.dims[0] == 'C'
 ...
 
 Read image as xarray DataArray with physical coordinates and attributes:
@@ -261,8 +261,8 @@ Access multiple scenes:
 
 >>> with CziFile('Example.czi') as czi:
 ...     # iterate scenes individually and read as arrays
-...     for scene in czi.scenes.values():
-...         arr = scene.asarray()
+...     for img in czi.scenes.values():
+...         arr = img.asarray()
 ...
 ...     # query which scenes (indices) are available
 ...     assert list(czi.scenes.keys()) == [0, 1, 2]
@@ -277,12 +277,12 @@ Access multiple scenes:
 ...     }
 ...
 ...     # merge selected scenes into one
-...     scenes = czi.scenes(scene=[0, 1])  # first 2 scenes
-...     assert scenes.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 1109, 'X': 1760}
+...     img = czi.scenes(scene=[0, 1])  # first 2 scenes
+...     assert img.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 1109, 'X': 1760}
 ...
 ...     # merge all scenes into one
-...     scenes = czi.scenes()
-...     assert scenes.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 2055, 'X': 2581}
+...     img = czi.scenes()
+...     assert img.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 2055, 'X': 2581}
 ...
 
 Access pyramid levels:
@@ -302,7 +302,7 @@ Access attachments:
 ...     for attachment in czi.attachments():
 ...         name = attachment.attachment_entry.name
 ...         data = attachment.data()  # decoded (ndarray, tuple, bytes...)
-...         raw = attachment.data(raw=True)  # always bytes
+...         raw = attachment.data(raw=True)  # bytes; may be written to file
 ...
 ...     # convenience shortcut for TimeStamps attachment data
 ...     assert czi.timestamps.shape == (2,)
@@ -318,17 +318,30 @@ Low-level access to CZI file segments:
 ...     assert not hdr.update_pending
 ...
 ...     # iterate all subblock segments sequentially via the directory
-...     for sb in czi.subblocks():
-...         entry = sb.directory_entry
+...     for segdata in czi.subblocks():
+...         entry = segdata.directory_entry
 ...         assert entry.dims == ('H', 'T', 'C', 'Z', 'Y', 'X', 'S')
 ...         assert entry.start == (0, 0, 0, 0, 0, 582, 0)
 ...         assert entry.shape == (1, 1, 1, 1, 486, 1178, 1)
 ...         assert entry.stored_shape == (1, 1, 1, 1, 243, 589, 1)
 ...         assert entry.compression == CziCompressionType.ZSTDHDR
-...         assert sb.data().shape == (1, 1, 1, 1, 243, 589, 1)  # stored_shape
-...         assert isinstance(sb.data(raw=True), bytes)
-...         assert sb.metadata().startswith('<METADATA>')
+...         assert segdata.data_offset == 661865  # offset of image data
+...         assert segdata.data_size == 183875  # size of compressed image data
+...         tile = segdata.data()  # decompressed image data as numpy array
+...         assert tile.shape == entry.stored_shape
+...         assert tile.dtype == entry.pixel_type.dtype
+...         assert isinstance(segdata.data(raw=True), bytes)  # compressed data
+...         assert segdata.metadata().startswith('<METADATA>')
 ...         break  # just the first subblock segment for demonstration
+...
+...     # iterate only image tiles in a selected image view
+...     img = czi.scenes[0](T=0, C=0, Z=0)
+...     for entry in img.directory_entries:
+...         segdata = entry.read_segment_data(czi)
+...         assert isinstance(segdata, CziSubBlockSegmentData)
+...         tile = segdata.data()
+...         assert tile.shape == entry.stored_shape
+...         break  # just the first filtered directory entry
 ...
 ...     # walk all file segments by type using their ZISRAW segment IDs
 ...     for segdata in czi.segments(CziSegmentId.ZISRAWSUBBLOCK):
@@ -350,7 +363,7 @@ View the images and metadata in a CZI file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.3.14'
+__version__ = '2026.3.15'
 
 __all__ = [
     'CONVERT_PIXELTYPE',
@@ -369,7 +382,7 @@ __all__ = [
     'CziFileError',
     'CziFileHeaderSegmentData',
     'CziImage',
-    'CziImagePlanes',
+    'CziImageChunks',
     'CziMetadataSegmentData',
     'CziPixelType',
     'CziPyramidType',
@@ -387,6 +400,7 @@ __all__ = [
 ]
 
 import abc
+import bisect
 import collections
 import contextlib
 import enum
@@ -772,6 +786,13 @@ class CziFile(BinaryFile):
     Raises:
         CziFileError: File is not a valid ZISRAW file.
 
+    Notes:
+        Opening a file with ``mode='r+'`` enables in-place modification
+        via :py:attr:`filehandle`. When used as a context manager, the
+        ``update_pending`` flag in the file header is automatically set
+        on entry and cleared on clean exit. It remains set if an
+        exception occurs, triggering a warning on the next open.
+
     """
 
     header: CziFileHeaderSegmentData
@@ -817,6 +838,29 @@ class CziFile(BinaryFile):
         if self.header.update_pending:
             logger().warning('file is pending update')
         self._squeeze = squeeze
+
+    def __enter__(self) -> Self:
+        super().__enter__()
+        if self._fh.writable():
+            fh = self._fh
+            fh.seek(self.header.segment.data_offset + 68)
+            fh.write(struct.pack('<i', 1))
+            self.header.update_pending = True
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        if self._fh.writable() and exc_type is None:
+            fh = self._fh
+            fh.seek(self.header.segment.data_offset + 68)
+            fh.write(struct.pack('<i', 0))
+            fh.flush()
+            self.header.update_pending = False
+        super().__exit__(exc_type, exc_value, traceback)
 
     def segments(
         self, kind: str | Sequence[str] | None = None, /
@@ -894,6 +938,23 @@ class CziFile(BinaryFile):
         return ElementTree.fromstring(xml_str)
 
     @cached_property
+    def metadata_segment(self) -> CziMetadataSegmentData | None:
+        """Metadata segment data, or ``None`` if not found."""
+        if self.header.metadata_position:
+            segment = CziSegment(self, self.header.metadata_position)
+            if segment.sid == CziMetadataSegmentData.SID:
+                return cast(CziMetadataSegmentData, segment.data())
+        try:
+            msd = cast(
+                CziMetadataSegmentData,
+                next(self.segments(CziMetadataSegmentData.SID)),
+            )
+            self.header.metadata_position = msd.segment.offset
+        except StopIteration:
+            return None
+        return msd
+
+    @cached_property
     def subblock_directory(self) -> tuple[CziDirectoryEntryDV, ...]:
         """All directory entries in file.
 
@@ -912,6 +973,64 @@ class CziFile(BinaryFile):
             cast(CziSubBlockSegmentData, segment).directory_entry
             for segment in self.segments(CziSubBlockSegmentData.SID)
         )
+
+    @cached_property
+    def filtered_subblock_directory(self) -> tuple[CziDirectoryEntryDV, ...]:
+        """Directory entries filtered to pyramid level 0.
+
+        Entries with a mosaic index are sorted by mosaic index so that
+        tiles with higher M-index are composited on top.
+
+        """
+        filtered = [
+            entry
+            for entry in self.subblock_directory
+            if entry.pyramid_type == 0
+        ]
+        if not filtered:
+            return self.subblock_directory
+
+        # Some producers store pyramid levels with pyramid_type=0 instead of
+        # using the proper pyramid_type field. Detect this by checking whether
+        # any entry has stored_shape != shape (is_pyramid). When a full-
+        # resolution subset exists AND the is_pyramid entries only duplicate
+        # existing non-spatial positions (i.e. they are thumbnails, not unique
+        # data like Airyscan detector channels), keep only the full-resolution
+        # entries so that _scale_factors comes out to 1.0.
+        if any(entry.is_pyramid for entry in filtered):
+            full_res = [entry for entry in filtered if not entry.is_pyramid]
+            if full_res:
+                # Build non-spatial position keys (exclude Y, X, S dims).
+                # If every is_pyramid key also exists in full_res, the
+                # is_pyramid entries are redundant thumbnails (safe to drop).
+                # If any is_pyramid entry has a unique position not in
+                # full_res (e.g. Airyscan H/C channels), keep all entries.
+                ref_dims = filtered[0].dims
+                yx_set = frozenset(
+                    i for i, d in enumerate(ref_dims) if d in ('Y', 'X', 'S')
+                )
+
+                def _ns_key(
+                    e: CziDirectoryEntryDV,
+                ) -> tuple[int, ...]:
+                    if e.dims == ref_dims:
+                        return tuple(
+                            s for i, s in enumerate(e.start) if i not in yx_set
+                        )
+                    d = dict(zip(e.dims, e.start, strict=True))
+                    return tuple(
+                        d.get(dim, 0)
+                        for i, dim in enumerate(ref_dims)
+                        if i not in yx_set
+                    )
+
+                full_res_keys = {_ns_key(e) for e in full_res}
+                pyramid_keys = {_ns_key(e) for e in filtered if e.is_pyramid}
+                if pyramid_keys <= full_res_keys:
+                    filtered = full_res
+        if any(entry.mosaic_index >= 0 for entry in filtered):
+            filtered.sort(key=lambda x: x.mosaic_index)
+        return tuple(filtered)
 
     @cached_property
     def attachment_directory(self) -> tuple[CziAttachmentEntryA1, ...]:
@@ -975,63 +1094,6 @@ class CziFile(BinaryFile):
             if attachment.attachment_entry.name == 'TimeStamps':
                 return attachment.data()  # type: ignore[no-any-return]
         return None
-
-    @cached_property
-    def filtered_subblock_directory(self) -> tuple[CziDirectoryEntryDV, ...]:
-        """Directory entries filtered to pyramid level 0.
-
-        Entries with a mosaic index are sorted by mosaic index so that
-        tiles with higher M-index are composited on top.
-
-        """
-        filtered = [
-            entry
-            for entry in self.subblock_directory
-            if entry.pyramid_type == 0
-        ]
-        if not filtered:
-            return self.subblock_directory
-        # Some producers store pyramid levels with pyramid_type=0 instead of
-        # using the proper pyramid_type field. Detect this by checking whether
-        # any entry has stored_shape != shape (is_pyramid). When a full-
-        # resolution subset exists AND the is_pyramid entries only duplicate
-        # existing non-spatial positions (i.e. they are thumbnails, not unique
-        # data like Airyscan detector channels), keep only the full-resolution
-        # entries so that _scale_factors comes out to 1.0.
-        if any(entry.is_pyramid for entry in filtered):
-            full_res = [entry for entry in filtered if not entry.is_pyramid]
-            if full_res:
-                # Build non-spatial position keys (exclude Y, X, S dims).
-                # If every is_pyramid key also exists in full_res, the
-                # is_pyramid entries are redundant thumbnails (safe to drop).
-                # If any is_pyramid entry has a unique position not in
-                # full_res (e.g. Airyscan H/C channels), keep all entries.
-                ref_dims = filtered[0].dims
-                yx_set = frozenset(
-                    i for i, d in enumerate(ref_dims) if d in ('Y', 'X', 'S')
-                )
-
-                def _ns_key(
-                    e: CziDirectoryEntryDV,
-                ) -> tuple[int, ...]:
-                    if e.dims == ref_dims:
-                        return tuple(
-                            s for i, s in enumerate(e.start) if i not in yx_set
-                        )
-                    d = dict(zip(e.dims, e.start, strict=True))
-                    return tuple(
-                        d.get(dim, 0)
-                        for i, dim in enumerate(ref_dims)
-                        if i not in yx_set
-                    )
-
-                full_res_keys = {_ns_key(e) for e in full_res}
-                pyramid_keys = {_ns_key(e) for e in filtered if e.is_pyramid}
-                if pyramid_keys <= full_res_keys:
-                    filtered = full_res
-        if any(entry.mosaic_index >= 0 for entry in filtered):
-            filtered.sort(key=lambda x: x.mosaic_index)
-        return tuple(filtered)
 
     @cached_property
     def scenes(self) -> CziScenes:
@@ -1244,7 +1306,6 @@ class CziImage:
             ``int``, ``slice``, ``Sequence[int]``, or ``None``.
 
     Notes:
-
         All coordinates are absolute (CZI file-level), not relative to a
         scene or subblock. This follows the ZISRAW specification and the
         behaviour of the libczi reference implementation.
@@ -1279,30 +1340,17 @@ class CziImage:
         pixel coordinates, matching the values in :py:attr:`CziImage.bbox`
         and :py:attr:`CziImage.start`.
 
-        **Planes iteration**: ``coords`` tuples from
-        :py:meth:`CziImagePlanes.keys` and :py:meth:`CziImagePlanes.items`
-        contain absolute dimension values (for example, T=5 when the file's
-        T axis starts at 5).
-
-        **Planes indexed access** (:py:meth:`CziImagePlanes.__getitem__`):
-        tuple index elements are absolute coordinate values,
-        not positional offsets into the iteration sequence.
-        Use the values returned by :py:meth:`CziImagePlanes.keys` directly as
-        indices.
-
         **Squeeze and size-1 dimensions**:
         when ``squeeze=True`` (the default), dimensions of length 1 are
         removed from :py:attr:`CziImage.dims`, :py:attr:`CziImage.start`,
-        and the :py:class:`CziImagePlanes` iteration axes.
-        If, for example, a file contains only one time point (T starts at 5)
-        and squeeze is enabled, ``'T'`` will not appear in
-        :py:attr:`CziImage.dims` and passing ``T=5`` as a coordinate to
-        :py:meth:`CziImagePlanes.__getitem__` will raise an error.
+        and the :py:class:`CziImageChunks` iteration axes.
         Disable squeeze with ``CziFile(file, squeeze=False)`` when you
         need to access all coordinate axes unconditionally.
 
         **Scene access** (:py:class:`CziScenes`): scene selection uses the
         absolute S-coordinate, consistent with all other dimension access.
+        Here, S-coordinate refers to scene indices, not the sample
+        dimension ``S``.
         ``czi.scenes[4]`` selects the scene whose S-coordinate is 4 in the
         file. ``KeyError`` is raised for an unknown S-coordinate.
         ``czi.scenes(scene=slice(2, 5))`` returns a merged image of all
@@ -1351,6 +1399,222 @@ class CziImage:
         self._pixeltype = pixeltype
         self._storedsize = storedsize
         self._levels = [self]
+
+    def __call__(
+        self,
+        *,
+        roi: tuple[int, int, int, int] | None = None,
+        pixeltype: CziPixelType | None = None,
+        storedsize: bool | None = None,
+        **selection: SelectionValue,
+    ) -> CziImage:
+        """Return new CziImage with dimension selection and/or ROI.
+
+        Parameters:
+            roi:
+                Spatial region of interest in absolute pixel coordinates
+                ``(x, y, width, height)``.
+            pixeltype:
+                Output pixel type override.
+                If ``None``, inherit any existing override from this image.
+            storedsize:
+                Return pixel data at stored resolution without resampling.
+                If ``None``, inherit from parent image.
+            **selection:
+                Dimension selections.
+                Keys are dimension names (single uppercase characters,
+                excluding X/Y/S).
+                Values can be ``int`` (single index), ``slice`` (range),
+                ``Sequence[int]`` (specific indices), or ``None`` (all
+                values; use for dimension ordering only).
+                All values are absolute CZI file-level coordinates.
+
+                **Output dimension order** is determined as follows:
+                (1) unspecified non-spatial dimensions, in file order;
+                (2) specified dimensions, in the order they appear as
+                keyword arguments;
+                (3) spatial dimensions (Y, X, and optionally S), always
+                last.
+                Dimensions selected with an ``int`` are collapsed and do
+                not appear in the output shape.
+
+        Raises:
+            TypeError:
+                If this CziImage already has a ROI applied, or if a
+                dimension selection is requested on an image that already
+                has a dimension selection or ROI applied.
+                Applying a ROI to an image that already has a dimension
+                selection is permitted (one level of chaining only):
+                ``img(C=0)(roi=...)`` works, but further calls on the
+                result always raise ``TypeError``.
+            ValueError:
+                If roi width or height is not positive, or if a
+                dimension name is unknown or spatial.
+
+        Example::
+
+            # img.dims = ('T', 'C', 'Z', 'Y', 'X')
+
+            # fix C=1: result has dims ('T', 'Z', 'Y', 'X')
+            sub = img(C=1)
+
+            # reorder to Z-outer, T-inner; result has dims ('Z', 'T', 'Y', 'X')
+            sub = img(Z=None, T=None)
+
+            # combine: fix T to first time-point, then reorder C outer Z inner
+            # all coordinate values are absolute CZI file-level indices
+            sub = img(T=0, C=None, Z=None)  # dims: ('C', 'Z', 'Y', 'X')
+
+            # crop to a 256x256 ROI (absolute pixel coordinates)
+            x0, y0, *_ = img.bbox
+            sub = img(C=0, roi=(x0, y0, 256, 256))
+
+        """
+        inherited_pixeltype = (
+            pixeltype if pixeltype is not None else self._pixeltype
+        )
+        inherited_storedsize = (
+            storedsize if storedsize is not None else self._storedsize
+        )
+        if (
+            not selection
+            and roi is None
+            and pixeltype is None
+            and storedsize is None
+        ):
+            return self
+        # Chaining rule:
+        #   - Applying a ROI on top of a dimension selection is allowed.
+        #   - Re-applying a selection, re-applying a ROI, or applying a
+        #     selection on top of a ROI are all disallowed.
+        if selection and (self._selection or self._roi is not None):
+            msg = (
+                'cannot apply dimension selection to a CziImage that'
+                ' already has selection or roi applied'
+            )
+            raise TypeError(msg)
+        if roi is not None and self._roi is not None:
+            msg = (
+                'cannot apply roi to a CziImage that already has a roi applied'
+            )
+            raise TypeError(msg)
+
+        # validate selection dimensions
+        raw = self._raw_sizes
+        dims_list = list(raw.keys())
+        for dim in selection:
+            if dim in ('X', 'Y', 'S'):
+                if dim == 'S':
+                    msg = (
+                        "'S' is the scene/sample dimension: "
+                        'use czi.scenes for scene filtering'
+                    )
+                else:
+                    msg = f'{dim!r} is a spatial dimension: use roi'
+                raise ValueError(msg)
+            if dim not in raw:
+                msg = (
+                    f'unknown dimension {dim!r}, '
+                    f'available: {tuple(raw.keys())}'
+                )
+                raise ValueError(msg)
+
+        # filter entries by dimension selection
+        entries: (
+            tuple[CziDirectoryEntryDV, ...] | list[CziDirectoryEntryDV]
+        ) = self._entries
+        for dim, val in selection.items():
+            if val is None:
+                continue
+            dim_idx = dims_list.index(dim)
+            if isinstance(val, int):
+                entries = tuple(e for e in entries if e.start[dim_idx] == val)
+            elif isinstance(val, slice):
+                # Absolute coordinate range, consistent with int selection:
+                # slice start/stop/step are coordinate values, not positions.
+                dim_start = self._start[dim_idx]
+                dim_size = raw[dim]
+                s_start = val.start if val.start is not None else dim_start
+                s_stop = (
+                    val.stop
+                    if val.stop is not None
+                    else (dim_start + dim_size)
+                )
+                s_step = val.step if val.step is not None else 1
+                selected_set = set(range(s_start, s_stop, s_step))
+                entries = tuple(
+                    e for e in entries if e.start[dim_idx] in selected_set
+                )
+            else:
+                # Sequence[int] - values are coordinate values
+                allowed = set(val)
+                entries = tuple(
+                    e for e in entries if e.start[dim_idx] in allowed
+                )
+
+        if not entries:
+            msg = 'selection matches no subblocks'
+            raise ValueError(msg)
+
+        # filter entries by spatial ROI
+        if roi is not None:
+            rx, ry, rw, rh = roi
+            if rw <= 0 or rh <= 0:
+                msg = 'roi width and height must be positive'
+                raise ValueError(msg)
+            layout = self._subblock_layout
+            xi = layout.x_idx
+            yi = layout.y_idx
+            # Use cached spatial index when filtering the full _entries
+            # unchanged (no dimension selection applied first). This is the
+            # common case for repeated tile reads on the same CziImage.
+            if entries is self._entries and xi >= 0:
+                entries = tuple(self._spatial_index_filter(rx, ry, rw, rh))
+            else:
+                roi_filtered: list[CziDirectoryEntryDV] = []
+                for e in entries:
+                    if xi >= 0:
+                        ex = e.start[xi]
+                        ew = e.shape[xi]
+                        if ex + ew <= rx or ex >= rx + rw:
+                            continue
+                    if yi >= 0:
+                        ey = e.start[yi]
+                        eh = e.shape[yi]
+                        if ey + eh <= ry or ey >= ry + rh:
+                            continue
+                    roi_filtered.append(e)
+                entries = tuple(roi_filtered)
+            if not entries:
+                msg = 'roi matches no subblocks'
+                raise ValueError(msg)
+
+        # build name
+        parts = []
+        if self._name:
+            parts.append(self._name)
+        sel_parts = [f'{d}={v!r}' for d, v in selection.items()]
+        if sel_parts:
+            parts.append(', '.join(sel_parts))
+        if roi is not None:
+            parts.append(f'roi={roi!r}')
+        name = ' '.join(parts) if parts else ''
+
+        # When chaining ROI onto an image that already has a dimension
+        # selection, carry the parent selection forward so that dimension
+        # ordering is preserved in the result.
+        merged_selection = {**self._selection, **selection}
+
+        return CziImage(
+            self._parent,
+            tuple(entries) if isinstance(entries, list) else entries,
+            name=name,
+            squeeze=self._squeeze,
+            roi=roi,
+            pixeltype=inherited_pixeltype,
+            storedsize=inherited_storedsize,
+            selection=merged_selection or selection,
+        )
 
     @property
     def name(self) -> str:
@@ -1888,6 +2152,398 @@ class CziImage:
         """Return pixel data at stored resolution without resampling."""
         return self._storedsize
 
+    def asarray(
+        self,
+        *,
+        fillvalue: ArrayLike | None = 0,
+        maxworkers: int | None = None,
+        out: OutputType = None,
+    ) -> NDArray[Any]:
+        """Return image data from file as numpy array.
+
+        Parameters:
+            fillvalue:
+                Value for pixels not covered by any subblock.
+            maxworkers:
+                Maximum number of threads to decode subblock data.
+                By default, up to half the CPU cores are used.
+            out:
+                Output destination for image data.
+                If ``None``, create a new NumPy array in main memory.
+                If ``'memmap'``, create a memory-mapped array in a
+                temporary file.
+                If a ``numpy.ndarray``, a writable, initialized array
+                of compatible shape and dtype.
+                If a ``file name`` or ``open file``, create a
+                memory-mapped array in the specified file.
+
+        """
+        dest_pixeltype = self.pixeltype
+        raw_sizes = self._raw_sizes
+
+        # determine if dimension reordering is needed
+        needs_reorder = False
+        inv_perm: tuple[int, ...] = ()
+        if self._selection:
+            file_dims = list(raw_sizes.keys())
+            desired_dims = list(self._dim_order)
+            if file_dims != desired_dims:
+                needs_reorder = True
+                inv_perm = tuple(desired_dims.index(d) for d in file_dims)
+
+        if needs_reorder:
+            desired_shape = tuple(raw_sizes[d] for d in self._dim_order)
+            out = create_output(
+                out, desired_shape, self.dtype, fillvalue=fillvalue
+            )
+            # file-order view for tile compositing
+            compositing_out = out.transpose(inv_perm)
+        else:
+            raw_shape = tuple(raw_sizes.values())
+            out = create_output(
+                out, raw_shape, self.dtype, fillvalue=fillvalue
+            )
+            compositing_out = out
+
+        c = self.compression
+
+        # warn once if SYSTEMRAW: data is read as raw bytes, not decoded pixels
+        if int(c) > 999:
+            logger().warning(f'{c!r} reading raw bytes as uncompressed pixels')
+
+        roi = self._roi
+        layout = self._subblock_layout
+        x_idx = layout.x_idx
+        y_idx = layout.y_idx
+        is_upsampled = layout.is_upsampled
+        is_pyramid_level = layout.is_pyramid_level
+        is_downsampled = layout.is_downsampled
+        dims = self._entries[0].dims if self._entries else ()
+        sf = self._scale_factors
+        ss_sf = self._storedsize_scale
+        use_storedsize = self._storedsize and bool(ss_sf)
+
+        # precompute pyramid-scaled ROI to avoid redundant per-tile work
+        if roi is not None and is_pyramid_level:
+            rx, ry, rw, rh = roi
+            pyr_ry = round(ry / sf[y_idx]) if y_idx >= 0 else 0
+            pyr_rh = round(rh / sf[y_idx]) if y_idx >= 0 else 0
+            pyr_rx = round(rx / sf[x_idx]) if x_idx >= 0 else 0
+            pyr_rw = round(rw / sf[x_idx]) if x_idx >= 0 else 0
+        else:
+            pyr_rx = pyr_ry = pyr_rw = pyr_rh = 0
+
+        # precompute storedsize-scaled ROI
+        if roi is not None and use_storedsize:
+            rx, ry, rw, rh = roi
+            ss_ry = round(ry * ss_sf[y_idx]) if y_idx >= 0 else 0
+            ss_rh = round(rh * ss_sf[y_idx]) if y_idx >= 0 else 0
+            ss_rx = round(rx * ss_sf[x_idx]) if x_idx >= 0 else 0
+            ss_rw = round(rw * ss_sf[x_idx]) if x_idx >= 0 else 0
+        else:
+            ss_rx = ss_ry = ss_rw = ss_rh = 0
+
+        # precompute inverse ss_sf for start coordinate mapping
+        inv_ss_sf = tuple(1.0 / f for f in ss_sf) if use_storedsize else ()
+
+        def func(
+            directory_entry: CziDirectoryEntryDV,
+            start: tuple[int, ...] = self._start,
+            out: Any = compositing_out,
+        ) -> None:
+            subblock = directory_entry.read_segment_data(self._parent)
+            if not isinstance(subblock, CziSubBlockSegmentData):
+                return
+
+            tile = subblock.data()
+            if directory_entry.pixel_type != dest_pixeltype:
+                converter = CONVERT_PIXELTYPE.get(
+                    (directory_entry.pixel_type, dest_pixeltype)
+                )
+                if converter is not None:
+                    tile = converter(tile)
+
+            entry_sf: tuple[float, ...] = ()
+            if not use_storedsize and (
+                is_upsampled
+                or is_downsampled
+                or directory_entry.stored_shape != directory_entry.shape
+            ):
+                esf = tuple(
+                    float(s) / float(ss) if ss > 0 else 1.0
+                    for s, ss in zip(
+                        directory_entry.shape,
+                        directory_entry.stored_shape,
+                        strict=True,
+                    )
+                )
+                if is_upsampled:
+                    entry_sf = esf
+                    for d, f in enumerate(esf):
+                        if f > 1.0:
+                            tile = numpy.repeat(tile, round(f), axis=d)
+                else:
+                    for d, f in enumerate(esf):
+                        if f < 1.0:
+                            n_in = tile.shape[d]
+                            n_out = round(n_in * f)
+                            idx = numpy.floor(
+                                numpy.arange(n_out) * n_in / n_out
+                            ).astype(numpy.intp)
+                            tile = numpy.take(tile, idx, axis=d)
+
+            entry_start: tuple[int, ...]
+            if directory_entry.dims != dims:
+                d_start = dict(
+                    zip(
+                        directory_entry.dims,
+                        directory_entry.start,
+                        strict=True,
+                    )
+                )
+                entry_start = tuple(d_start.get(d, 0) for d in dims)
+                d_tile = dict(
+                    zip(directory_entry.dims, tile.shape, strict=True)
+                )
+                tile = tile.reshape(tuple(d_tile.get(d, 1) for d in dims))
+                if entry_sf:
+                    d_sf = dict(
+                        zip(directory_entry.dims, entry_sf, strict=True)
+                    )
+                    entry_sf = tuple(d_sf.get(d, 1.0) for d in dims)
+            else:
+                entry_start = directory_entry.start
+
+            if roi is not None:
+                if is_pyramid_level:
+                    # use precomputed pyramid-scaled ROI
+                    rx, ry, rw, rh = pyr_rx, pyr_ry, pyr_rw, pyr_rh
+                    entry_start = tuple(
+                        round(s / f)
+                        for s, f in zip(entry_start, sf, strict=True)
+                    )
+                elif use_storedsize:
+                    rx, ry, rw, rh = ss_rx, ss_ry, ss_rw, ss_rh
+                    entry_start = tuple(
+                        round(s / f)
+                        for s, f in zip(entry_start, inv_ss_sf, strict=True)
+                    )
+                else:
+                    rx, ry, rw, rh = roi
+                # compute tile-to-output mapping with ROI clipping
+                index_list = []
+                tile_slices = []
+                for d in range(len(start)):
+                    t_start = entry_start[d]
+                    t_size = tile.shape[d]
+                    if d == y_idx:
+                        # clip to ROI Y range
+                        src_lo = max(t_start, ry)
+                        src_hi = min(t_start + t_size, ry + rh)
+                        if src_lo >= src_hi:
+                            return  # tile does not overlap ROI
+                        tile_slices.append(
+                            slice(src_lo - t_start, src_hi - t_start)
+                        )
+                        index_list.append(slice(src_lo - ry, src_hi - ry))
+                    elif d == x_idx:
+                        # clip to ROI X range
+                        src_lo = max(t_start, rx)
+                        src_hi = min(t_start + t_size, rx + rw)
+                        if src_lo >= src_hi:
+                            return  # tile does not overlap ROI
+                        tile_slices.append(
+                            slice(src_lo - t_start, src_hi - t_start)
+                        )
+                        index_list.append(slice(src_lo - rx, src_hi - rx))
+                    else:
+                        tile_slices.append(slice(None))
+                        index_list.append(
+                            slice(
+                                t_start - start[d],
+                                t_start - start[d] + t_size,
+                            )
+                        )
+                index = tuple(index_list)
+                tile = tile[tuple(tile_slices)]
+            elif is_pyramid_level or use_storedsize:
+                csf = sf if is_pyramid_level else inv_ss_sf
+                index = tuple(
+                    slice(
+                        round(i / f) - j,
+                        round(i / f) - j + k,
+                    )
+                    for i, j, k, f in zip(
+                        entry_start,
+                        start,
+                        tile.shape,
+                        csf,
+                        strict=True,
+                    )
+                )
+            else:
+                index = tuple(
+                    slice(i - j, i - j + k)
+                    for i, j, k in zip(
+                        entry_start,
+                        start,
+                        tile.shape,
+                        strict=True,
+                    )
+                )
+
+            # Skip mask() method call when attachment_size is too
+            # small to contain a mask (common case). This avoids the
+            # overhead of attachments() parsing on every tile.
+            mask = subblock.mask() if subblock.attachment_size >= 32 else None
+            if mask is not None:
+                if is_upsampled and entry_sf:
+                    # mask was decoded at stored size; repeat to logical size
+                    if y_idx >= 0 and entry_sf[y_idx] > 1.0:
+                        mask = numpy.repeat(
+                            mask, round(entry_sf[y_idx]), axis=0
+                        )
+                    if x_idx >= 0 and entry_sf[x_idx] > 1.0:
+                        mask = numpy.repeat(
+                            mask, round(entry_sf[x_idx]), axis=1
+                        )
+                if roi is not None:
+                    mask = mask[
+                        tile_slices[y_idx] if y_idx >= 0 else slice(None),
+                        tile_slices[x_idx] if x_idx >= 0 else slice(None),
+                    ]
+                # If the decoded tile is smaller than the mask (CZI writer bug
+                # where stored_shape > actual decoded size), clip the mask to
+                # match the tile dimensions before broadcasting.
+                if y_idx >= 0 and mask.shape[0] > tile.shape[y_idx]:
+                    mask = mask[: tile.shape[y_idx], :]
+                if x_idx >= 0 and mask.shape[1] > tile.shape[x_idx]:
+                    mask = mask[:, : tile.shape[x_idx]]
+                # Expand (Y, X) mask to the full tile shape by inserting
+                # singleton axes for all non-Y, non-X dims (e.g. C, S).
+                # This ensures numpy broadcasting works for any tile rank.
+                expand_axes = tuple(
+                    i
+                    for i in range(tile.ndim)
+                    if (y_idx < 0 or i != y_idx) and (x_idx < 0 or i != x_idx)
+                )
+                mask_nd = numpy.expand_dims(mask, axis=expand_axes)
+                dest = out[index]
+                numpy.copyto(dest, tile, where=mask_nd)
+            else:
+                out[index] = tile
+
+        if maxworkers is None:
+            maxworkers = self._default_maxworkers
+        if maxworkers > 1:
+            # The file-handle lock (set_lock) serialises I/O only.
+            # Concurrent numpy writes to `out` are safe as long as tiles do
+            # not share output pixels, which holds for non-overlapping tiles.
+            # For mosaic images the directory entries are pre-sorted by
+            # mosaic_index (ascending) so that tiles with a higher M-index
+            # are composited on top. Because ThreadPoolExecutor does not
+            # guarantee execution order, the final value of any pixel covered
+            # by more than one tile is non-deterministic under multi-threading.
+            # This is acceptable in practice because overlapping mosaic
+            # tiles are rare and the overlap region is typically a thin seam.
+            # maxworkers=1 forces sequential, fully deterministic
+            # compositing when exact overlap behaviour is required.
+            self._parent.set_lock(True)
+            try:
+                with ThreadPoolExecutor(maxworkers) as executor:
+                    for _ in executor.map(func, self._entries):
+                        pass
+            finally:
+                self._parent.set_lock(False)
+        else:
+            for directory_entry in self._entries:
+                func(directory_entry)
+
+        if hasattr(out, 'flush'):
+            out.flush()
+
+        if self._squeeze:
+            out = out.squeeze()
+
+        return out
+
+    def asxarray(self, **kwargs: Any) -> DataArray:
+        """Return image data as xarray DataArray.
+
+        Parameters:
+            **kwargs:
+                Keyword arguments forwarded to :py:meth:`asarray`:
+                ``fillvalue``, ``maxworkers``, and ``out``.
+
+        """
+        from xarray import DataArray
+
+        return DataArray(
+            self.asarray(**kwargs),
+            coords=self.coords,
+            dims=self.dims,
+            name=self._name,
+            attrs=self.attrs,
+        )
+
+    def chunks(
+        self, *, squeeze: bool = True, **sizes: int | None
+    ) -> CziImageChunks:
+        """Return image chunks as CziImage views.
+
+        Each chunk is a :py:class:`CziImage` with the full API including
+        :py:meth:`asarray`, :py:meth:`asxarray`, :py:attr:`bbox`,
+        :py:attr:`dims`, :py:attr:`sizes`, and :py:meth:`__call__`.
+
+        Parameters:
+            squeeze:
+                Whether to drop size-1 dimensions from each chunk.
+                When ``False``, size-1 axes such as the single T or Z index
+                per chunk are retained in :py:attr:`~CziImage.dims` and
+                :py:attr:`~CziImage.shape`.
+            **sizes:
+                Chunk size specification as keyword arguments.
+                Keys are dimension names, values control behavior:
+
+                - *Absent* non-spatial dimension: iterated one-at-a-time.
+                - *Absent* spatial dimension (Y, X): kept in full.
+                - ``None`` value: full axis kept in each chunk.
+                - ``int`` value: axis batched into groups of that size.
+                  For spatial dimensions, this produces a tiling grid.
+
+        Notes:
+            With no size arguments, non-spatial dimensions of length > 1 are
+            iterated one-at-a-time (equivalent to plane-by-plane iteration).
+            Dimensions of length 1 are skipped when the parent image uses
+            squeeze (the default).
+            ``squeeze`` controls only how each chunk presents its dimensions:
+            size-1 axes are dropped when ``True`` (default) and retained
+            when ``False``.
+
+        Example::
+
+            # iterate individual Y/X planes
+            for chunk in img.chunks():
+                process(chunk.asarray())
+
+            # keep C in each chunk, iterate T and Z
+            for chunk in img.chunks(C=None):
+                assert 'C' in chunk.dims
+
+            # batch Z into groups of 10
+            for chunk in img.chunks(Z=10):
+                arr = chunk.asarray()
+
+            # spatial tiling: 512x512 tiles
+            for chunk in img.chunks(Y=512, X=512):
+                tile = chunk.asarray()
+
+        For bulk reads, use :py:meth:`CziImage.asarray` directly, which is
+        faster as it composites all tiles in a single parallel pass.
+
+        """
+        return CziImageChunks(self, sizes, squeeze=squeeze)
+
     @cached_property
     def _storedsize_scale(self) -> tuple[float, ...]:
         """Inverse scale factors for storedsize coordinate mapping.
@@ -2077,7 +2733,7 @@ class CziImage:
         ptype = self._entries[0].pyramid_type
         dims = self._entries[0].dims
         # True pyramid overview: pyramid_type is uniform across all tiles,
-        # so entry 0 is sufficient.
+        # so entry 0 is sufficient
         is_pyr = (
             bool(sf)
             and any(f != 1.0 for f in sf)
@@ -2114,6 +2770,65 @@ class CziImage:
         )
 
     @cached_property
+    def _spatial_index(
+        self,
+    ) -> tuple[
+        tuple[int, ...],  # sorted entry start-x values
+        tuple[CziDirectoryEntryDV, ...],  # entries in sorted order
+    ]:
+        """Cached spatial index over _entries sorted by X start.
+
+        Used by _spatial_index_filter for fast ROI lookup.
+        Dimension indices x_idx/y_idx are read from _subblock_layout.
+
+        """
+        x_idx = self._subblock_layout.x_idx
+        if x_idx < 0:
+            return (), self._entries
+        sorted_entries = sorted(self._entries, key=lambda e: e.start[x_idx])
+        starts_x = tuple(e.start[x_idx] for e in sorted_entries)
+        return starts_x, tuple(sorted_entries)
+
+    def _spatial_index_filter(
+        self,
+        rx: int,
+        ry: int,
+        rw: int,
+        rh: int,
+    ) -> list[CziDirectoryEntryDV]:
+        """Return entries overlapping the given ROI using the spatial index.
+
+        Parameters:
+            rx: ROI left edge (absolute X coordinate).
+            ry: ROI top edge (absolute Y coordinate).
+            rw: ROI width in pixels.
+            rh: ROI height in pixels.
+
+        """
+        x_idx = self._subblock_layout.x_idx
+        y_idx = self._subblock_layout.y_idx
+        starts_x, sorted_entries = self._spatial_index
+        rx_end = rx + rw
+        # Find the range of sorted entries whose stop_x > rx
+        # (i.e., not completely to the left of the ROI).
+        # starts_x is sorted, so entries with start_x >= rx_end are completely
+        # to the right and can be skipped. stop_x is computed on the fly
+        # (avoid caching N extra int objects).
+        right_bound = bisect.bisect_left(starts_x, rx_end)
+        result: list[CziDirectoryEntryDV] = []
+        for i in range(right_bound):
+            e = sorted_entries[i]
+            if e.start[x_idx] + e.shape[x_idx] <= rx:
+                continue  # completely to the left
+            if y_idx >= 0:
+                ey = e.start[y_idx]
+                eh = e.shape[y_idx]
+                if ey + eh <= ry or ey >= ry + rh:
+                    continue
+            result.append(e)
+        return result
+
+    @cached_property
     def _default_maxworkers(self) -> int:
         """Default maxworkers for parallel tile compositing.
 
@@ -2140,527 +2855,6 @@ class CziImage:
             return 1
         return default_maxworkers()
 
-    def __call__(
-        self,
-        *,
-        roi: tuple[int, int, int, int] | None = None,
-        pixeltype: CziPixelType | None = None,
-        storedsize: bool | None = None,
-        **selection: SelectionValue,
-    ) -> CziImage:
-        """Return new CziImage with dimension selection and/or ROI.
-
-        Parameters:
-            roi:
-                Spatial region of interest in absolute pixel coordinates
-                ``(x, y, width, height)``.
-            pixeltype:
-                Output pixel type override.
-                If ``None``, inherit any existing override from this image.
-            storedsize:
-                Return pixel data at stored resolution without resampling.
-                If ``None``, inherit from parent image.
-            **selection:
-                Dimension selections. Keys are dimension names (single
-                uppercase characters, excluding X/Y/S). Values can be
-                ``int`` (single index), ``slice`` (range),
-                ``Sequence[int]`` (specific indices), or ``None`` (all
-                values; use for dimension ordering only).
-                All values are absolute CZI file-level coordinates.
-
-                **Output dimension order** is determined as follows:
-                (1) unspecified non-spatial dimensions, in file order;
-                (2) specified dimensions, in the order they appear as
-                keyword arguments;
-                (3) spatial dimensions (Y, X, and optionally S), always
-                last.
-                Dimensions selected with an ``int`` are collapsed and do
-                not appear in the output shape.
-
-        Raises:
-            TypeError:
-                If this CziImage already has a ROI applied, or if a
-                dimension selection is requested on an image that already
-                has a dimension selection or ROI applied.
-                Applying a ROI to an image that already has a dimension
-                selection is permitted (one level of chaining only):
-                ``img(C=0)(roi=...)`` works, but further calls on the
-                result always raise ``TypeError``.
-            ValueError:
-                If roi width or height is not positive, or if a
-                dimension name is unknown or spatial.
-
-        Example::
-
-            # img.dims = ('T', 'C', 'Z', 'Y', 'X')
-
-            # Fix C=1: result has dims ('T', 'Z', 'Y', 'X')
-            sub = img(C=1)
-
-            # Reorder to Z-outer, T-inner; result has dims ('Z', 'T', 'Y', 'X')
-            sub = img(Z=None, T=None)
-
-            # Combine: fix T to first time-point, then reorder C outer Z inner
-            # All coordinate values are absolute CZI file-level indices.
-            sub = img(T=0, C=None, Z=None)  # dims: ('C', 'Z', 'Y', 'X')
-
-            # Crop to a 256x256 ROI (absolute pixel coordinates)
-            x0, y0, *_ = img.bbox
-            sub = img(C=0, roi=(x0, y0, 256, 256))
-
-        """
-        inherited_pixeltype = (
-            pixeltype if pixeltype is not None else self._pixeltype
-        )
-        inherited_storedsize = (
-            storedsize if storedsize is not None else self._storedsize
-        )
-        if (
-            not selection
-            and roi is None
-            and pixeltype is None
-            and storedsize is None
-        ):
-            return self
-        # Chaining rule:
-        #   - Applying a ROI on top of a dimension selection is allowed.
-        #   - Re-applying a selection, re-applying a ROI, or applying a
-        #     selection on top of a ROI are all disallowed.
-        if selection and (self._selection or self._roi is not None):
-            msg = (
-                'cannot apply dimension selection to a CziImage that'
-                ' already has selection or roi applied'
-            )
-            raise TypeError(msg)
-        if roi is not None and self._roi is not None:
-            msg = (
-                'cannot apply roi to a CziImage that already has a roi applied'
-            )
-            raise TypeError(msg)
-
-        # validate selection dimensions
-        raw = self._raw_sizes
-        dims_list = list(raw.keys())
-        for dim in selection:
-            if dim in ('X', 'Y', 'S'):
-                if dim == 'S':
-                    msg = (
-                        "'S' is the scene/sample dimension: "
-                        'use czi.scenes for scene filtering'
-                    )
-                else:
-                    msg = f'{dim!r} is a spatial dimension: use roi'
-                raise ValueError(msg)
-            if dim not in raw:
-                msg = (
-                    f'unknown dimension {dim!r}, '
-                    f'available: {tuple(raw.keys())}'
-                )
-                raise ValueError(msg)
-
-        # filter entries by dimension selection
-        entries: (
-            tuple[CziDirectoryEntryDV, ...] | list[CziDirectoryEntryDV]
-        ) = self._entries
-        for dim, val in selection.items():
-            if val is None:
-                continue
-            dim_idx = dims_list.index(dim)
-            if isinstance(val, int):
-                entries = tuple(e for e in entries if e.start[dim_idx] == val)
-            elif isinstance(val, slice):
-                # Absolute coordinate range, consistent with int selection:
-                # slice start/stop/step are coordinate values, not positions.
-                dim_start = self._start[dim_idx]
-                dim_size = raw[dim]
-                s_start = val.start if val.start is not None else dim_start
-                s_stop = (
-                    val.stop
-                    if val.stop is not None
-                    else (dim_start + dim_size)
-                )
-                s_step = val.step if val.step is not None else 1
-                selected_set = set(range(s_start, s_stop, s_step))
-                entries = tuple(
-                    e for e in entries if e.start[dim_idx] in selected_set
-                )
-            else:
-                # Sequence[int] - values are coordinate values
-                allowed = set(val)
-                entries = tuple(
-                    e for e in entries if e.start[dim_idx] in allowed
-                )
-
-        if not entries:
-            msg = 'selection matches no subblocks'
-            raise ValueError(msg)
-
-        # filter entries by spatial ROI
-        if roi is not None:
-            rx, ry, rw, rh = roi
-            if rw <= 0 or rh <= 0:
-                msg = 'roi width and height must be positive'
-                raise ValueError(msg)
-            x_idx = dims_list.index('X') if 'X' in dims_list else None
-            y_idx = dims_list.index('Y') if 'Y' in dims_list else None
-            roi_filtered: list[CziDirectoryEntryDV] = []
-            for e in entries:
-                if x_idx is not None:
-                    ex = e.start[x_idx]
-                    ew = e.shape[x_idx]
-                    if ex + ew <= rx or ex >= rx + rw:
-                        continue
-                if y_idx is not None:
-                    ey = e.start[y_idx]
-                    eh = e.shape[y_idx]
-                    if ey + eh <= ry or ey >= ry + rh:
-                        continue
-                roi_filtered.append(e)
-            entries = tuple(roi_filtered)
-            if not entries:
-                msg = 'roi matches no subblocks'
-                raise ValueError(msg)
-
-        # build name
-        parts = []
-        if self._name:
-            parts.append(self._name)
-        sel_parts = [f'{d}={v!r}' for d, v in selection.items()]
-        if sel_parts:
-            parts.append(', '.join(sel_parts))
-        if roi is not None:
-            parts.append(f'roi={roi!r}')
-        name = ' '.join(parts) if parts else ''
-
-        # When chaining ROI onto an image that already has a dimension
-        # selection, carry the parent selection forward so that dimension
-        # ordering is preserved in the result.
-        merged_selection = {**self._selection, **selection}
-
-        return CziImage(
-            self._parent,
-            tuple(entries) if isinstance(entries, list) else entries,
-            name=name,
-            squeeze=self._squeeze,
-            roi=roi,
-            pixeltype=inherited_pixeltype,
-            storedsize=inherited_storedsize,
-            selection=merged_selection or selection,
-        )
-
-    def asarray(
-        self,
-        *,
-        fillvalue: ArrayLike | None = 0,
-        maxworkers: int | None = None,
-        out: OutputType = None,
-    ) -> NDArray[Any]:
-        """Return image data from file as numpy array.
-
-        Parameters:
-            fillvalue:
-                Value for pixels not covered by any subblock.
-            maxworkers:
-                Maximum number of threads to decode subblock data.
-                By default, up to half the CPU cores are used.
-            out:
-                Output destination for image data.
-                If ``None``, create a new NumPy array in main memory.
-                If ``'memmap'``, create a memory-mapped array in a
-                temporary file.
-                If a ``numpy.ndarray``, a writable, initialized array
-                of compatible shape and dtype.
-                If a ``file name`` or ``open file``, create a
-                memory-mapped array in the specified file.
-
-        """
-        dest_pixeltype = self.pixeltype
-        raw_sizes = self._raw_sizes
-
-        # determine if dimension reordering is needed
-        needs_reorder = False
-        inv_perm: tuple[int, ...] = ()
-        if self._selection:
-            file_dims = list(raw_sizes.keys())
-            desired_dims = list(self._dim_order)
-            if file_dims != desired_dims:
-                needs_reorder = True
-                inv_perm = tuple(desired_dims.index(d) for d in file_dims)
-
-        if needs_reorder:
-            desired_shape = tuple(raw_sizes[d] for d in self._dim_order)
-            out = create_output(
-                out, desired_shape, self.dtype, fillvalue=fillvalue
-            )
-            # file-order view for tile compositing
-            compositing_out = out.transpose(inv_perm)
-        else:
-            raw_shape = tuple(raw_sizes.values())
-            out = create_output(
-                out, raw_shape, self.dtype, fillvalue=fillvalue
-            )
-            compositing_out = out
-
-        c = self.compression
-
-        # warn once if SYSTEMRAW: data is read as raw bytes, not decoded pixels
-        if int(c) > 999:
-            logger().warning(f'{c!r} reading raw bytes as uncompressed pixels')
-
-        roi = self._roi
-        layout = self._subblock_layout
-        x_idx = layout.x_idx
-        y_idx = layout.y_idx
-        is_upsampled = layout.is_upsampled
-        is_pyramid_level = layout.is_pyramid_level
-        is_downsampled = layout.is_downsampled
-        dims = self._entries[0].dims if self._entries else ()
-        sf = self._scale_factors
-        ss_sf = self._storedsize_scale
-        use_storedsize = self._storedsize and bool(ss_sf)
-
-        # Precompute pyramid-scaled ROI to avoid redundant per-tile work
-        if roi is not None and is_pyramid_level:
-            rx, ry, rw, rh = roi
-            pyr_ry = round(ry / sf[y_idx]) if y_idx >= 0 else 0
-            pyr_rh = round(rh / sf[y_idx]) if y_idx >= 0 else 0
-            pyr_rx = round(rx / sf[x_idx]) if x_idx >= 0 else 0
-            pyr_rw = round(rw / sf[x_idx]) if x_idx >= 0 else 0
-        else:
-            pyr_rx = pyr_ry = pyr_rw = pyr_rh = 0
-
-        # Precompute storedsize-scaled ROI
-        if roi is not None and use_storedsize:
-            rx, ry, rw, rh = roi
-            ss_ry = round(ry * ss_sf[y_idx]) if y_idx >= 0 else 0
-            ss_rh = round(rh * ss_sf[y_idx]) if y_idx >= 0 else 0
-            ss_rx = round(rx * ss_sf[x_idx]) if x_idx >= 0 else 0
-            ss_rw = round(rw * ss_sf[x_idx]) if x_idx >= 0 else 0
-        else:
-            ss_rx = ss_ry = ss_rw = ss_rh = 0
-
-        # Precompute inverse ss_sf for start coordinate mapping
-        inv_ss_sf = tuple(1.0 / f for f in ss_sf) if use_storedsize else ()
-
-        def func(
-            directory_entry: CziDirectoryEntryDV,
-            start: tuple[int, ...] = self._start,
-            out: Any = compositing_out,
-        ) -> None:
-            subblock = directory_entry.read_segment_data(self._parent)
-            if not isinstance(subblock, CziSubBlockSegmentData):
-                return
-
-            tile, entry_start, entry_sf = prepare_subblock(
-                subblock,
-                directory_entry,
-                dims,
-                dest_pixeltype,
-                is_upsampled,
-                is_downsampled,
-                use_storedsize,
-            )
-
-            if roi is not None:
-                if is_pyramid_level:
-                    # use precomputed pyramid-scaled ROI
-                    rx, ry, rw, rh = pyr_rx, pyr_ry, pyr_rw, pyr_rh
-                    entry_start = tuple(
-                        round(s / f)
-                        for s, f in zip(entry_start, sf, strict=True)
-                    )
-                elif use_storedsize:
-                    rx, ry, rw, rh = ss_rx, ss_ry, ss_rw, ss_rh
-                    entry_start = tuple(
-                        round(s / f)
-                        for s, f in zip(entry_start, inv_ss_sf, strict=True)
-                    )
-                else:
-                    rx, ry, rw, rh = roi
-                # compute tile-to-output mapping with ROI clipping
-                index_list = []
-                tile_slices = []
-                for d in range(len(start)):
-                    t_start = entry_start[d]
-                    t_size = tile.shape[d]
-                    if d == y_idx:
-                        # clip to ROI Y range
-                        src_lo = max(t_start, ry)
-                        src_hi = min(t_start + t_size, ry + rh)
-                        tile_slices.append(
-                            slice(src_lo - t_start, src_hi - t_start)
-                        )
-                        index_list.append(slice(src_lo - ry, src_hi - ry))
-                    elif d == x_idx:
-                        # clip to ROI X range
-                        src_lo = max(t_start, rx)
-                        src_hi = min(t_start + t_size, rx + rw)
-                        tile_slices.append(
-                            slice(src_lo - t_start, src_hi - t_start)
-                        )
-                        index_list.append(slice(src_lo - rx, src_hi - rx))
-                    else:
-                        tile_slices.append(slice(None))
-                        index_list.append(
-                            slice(
-                                t_start - start[d],
-                                t_start - start[d] + t_size,
-                            )
-                        )
-                index = tuple(index_list)
-                tile = tile[tuple(tile_slices)]
-            elif is_pyramid_level or use_storedsize:
-                csf = sf if is_pyramid_level else inv_ss_sf
-                index = tuple(
-                    slice(
-                        round(i / f) - j,
-                        round(i / f) - j + k,
-                    )
-                    for i, j, k, f in zip(
-                        entry_start,
-                        start,
-                        tile.shape,
-                        csf,
-                        strict=True,
-                    )
-                )
-            else:
-                index = tuple(
-                    slice(i - j, i - j + k)
-                    for i, j, k in zip(
-                        entry_start,
-                        start,
-                        tile.shape,
-                        strict=True,
-                    )
-                )
-
-            # Skip mask() method call when attachment_size is too
-            # small to contain a mask (common case). This avoids the
-            # overhead of attachments() parsing on every tile.
-            mask = subblock.mask() if subblock.attachment_size >= 32 else None
-            if mask is not None:
-                if is_upsampled and entry_sf:
-                    # mask was decoded at stored size; repeat to logical size
-                    if y_idx >= 0 and entry_sf[y_idx] > 1.0:
-                        mask = numpy.repeat(
-                            mask, round(entry_sf[y_idx]), axis=0
-                        )
-                    if x_idx >= 0 and entry_sf[x_idx] > 1.0:
-                        mask = numpy.repeat(
-                            mask, round(entry_sf[x_idx]), axis=1
-                        )
-                if roi is not None:
-                    mask = mask[
-                        tile_slices[y_idx] if y_idx >= 0 else slice(None),
-                        tile_slices[x_idx] if x_idx >= 0 else slice(None),
-                    ]
-                # If the decoded tile is smaller than the mask (CZI writer bug
-                # where stored_shape > actual decoded size), clip the mask to
-                # match the tile dimensions before broadcasting.
-                if y_idx >= 0 and mask.shape[0] > tile.shape[y_idx]:
-                    mask = mask[: tile.shape[y_idx], :]
-                if x_idx >= 0 and mask.shape[1] > tile.shape[x_idx]:
-                    mask = mask[:, : tile.shape[x_idx]]
-                # Expand (Y, X) mask to the full tile shape by inserting
-                # singleton axes for all non-Y, non-X dims (e.g. C, S).
-                # This ensures numpy broadcasting works for any tile rank.
-                expand_axes = tuple(
-                    i
-                    for i in range(tile.ndim)
-                    if (y_idx < 0 or i != y_idx) and (x_idx < 0 or i != x_idx)
-                )
-                mask_nd = numpy.expand_dims(mask, axis=expand_axes)
-                dest = out[index]
-                numpy.copyto(dest, tile, where=mask_nd)
-            else:
-                out[index] = tile
-
-        if maxworkers is None:
-            maxworkers = self._default_maxworkers
-        if maxworkers > 1:
-            # The file-handle lock (set_lock) serialises I/O only.
-            # Concurrent numpy writes to `out` are safe as long as tiles do
-            # not share output pixels, which holds for non-overlapping tiles.
-            # For mosaic images the directory entries are pre-sorted by
-            # mosaic_index (ascending) so that tiles with a higher M-index
-            # are composited on top. Because ThreadPoolExecutor does not
-            # guarantee execution order, the final value of any pixel covered
-            # by more than one tile is non-deterministic under multi-threading.
-            # This is acceptable in practice because overlapping mosaic
-            # tiles are rare and the overlap region is typically a thin seam.
-            # maxworkers=1 forces sequential, fully deterministic
-            # compositing when exact overlap behaviour is required.
-            self._parent.set_lock(True)
-            try:
-                with ThreadPoolExecutor(maxworkers) as executor:
-                    for _ in executor.map(func, self._entries):
-                        pass
-            finally:
-                self._parent.set_lock(False)
-        else:
-            for directory_entry in self._entries:
-                func(directory_entry)
-
-        if hasattr(out, 'flush'):
-            out.flush()
-
-        if self._squeeze:
-            out = out.squeeze()
-
-        return out
-
-    def asxarray(self, **kwargs: Any) -> DataArray:
-        """Return image data as xarray DataArray.
-
-        Parameters:
-            **kwargs:
-                Keyword arguments forwarded to :py:meth:`asarray`:
-                ``fillvalue``, ``maxworkers``, and ``out``.
-
-        """
-        from xarray import DataArray
-
-        return DataArray(
-            self.asarray(**kwargs),
-            coords=self.coords,
-            dims=self.dims,
-            name=self._name,
-            attrs=self.attrs,
-        )
-
-    @property
-    def planes(self) -> CziImagePlanes:
-        """Interface for iterating or indexing individual Y/X planes.
-
-        Apply a selection via :py:meth:`CziImage.__call__` before accessing
-        this property to control which dimensions are iterated and in what
-        order.
-        Dimensions passed as ``None`` become the iteration axes;
-        dimensions passed as integers are fixed. Unspecified dimensions
-        appear first in file order, for example::
-
-            # unspecified dims (T) come first, then kwargs order (C, Z)
-            # iterates T-outer, C-middle, Z-inner
-            for plane in img(C=None, Z=None).planes:
-                process(plane)
-
-            # iterate with absolute coordinate values via items()
-            for coords, plane in img(C=None, Z=None).planes.items():
-                t, c, z = coords  # absolute coordinates not positional indices
-
-            # __getitem__ takes absolute coordinate values
-            # (same as returned by .planes.items())
-            plane = img(T=0).planes[0, 0]  # C=0, Z=0 absolute coordinates
-
-        For bulk reads, use :py:meth:`CziImage.asarray` directly, which is
-        faster as it composites all tiles in a single parallel pass.
-        For parallel tile compositing per plane, call
-        ``planes(maxworkers=N)``.
-
-        """
-        return CziImagePlanes(self)
-
     def __repr__(self) -> str:
         if len(self._levels) > 1:
             levels = f' {len(self._levels)} levels'
@@ -2681,441 +2875,357 @@ class CziImage:
 
 
 @final
-class CziImagePlanes:
-    """Lazy container of Y/X image planes from a CziImage.
+class CziImageChunks:
+    """Lazy container of image chunks from a CziImage.
 
-    A plane is the 2D (Y, X) or 3D (Y, X, S) pixel data for one
-    combination of non-spatial dimension coordinates.
-    For example, in a CZYX dataset, each (C, Z) combination is one plane.
+    Each chunk is a :py:class:`CziImage` view covering a subset of the
+    parent image's dimensions. Keyword arguments to
+    :py:meth:`CziImage.chunks` control which dimensions are iterated
+    and how they are batched.
 
-    Provides iteration, indexed access, and dict-like coordinate access.
-
-    Selection, dimension ordering, and ROI are derived from the
-    source CziImage. Use ``CziImage.__call__`` before accessing planes
-    to control which dimensions are iterated and in what order.
-    Dimensions passed as ``None`` become iteration axes. Dimensions
-    passed as integers are fixed and excluded from iteration::
-
-        # stream planes in Z-outer, C-inner order
-        for plane in image(Z=None, C=None).planes:
-            process(plane)
-
-        # iterate with absolute coordinate values
-        for coords, plane in image(Z=None, C=None).planes.items():
-            z, c = coords  # absolute coordinate values, not positional indices
-
-        # __getitem__ takes absolute coordinate values
-        # (same as returned by .planes.items())
-        plane = image.planes[0, 0]  # Z=0, C=0 absolute coordinates
-
-    For bulk reads prefer :py:meth:`CziImage.asarray`, which composites
-    all tiles in a single parallel pass and is therefore faster.
+    With no keyword arguments, non-spatial dimensions of length > 1 are
+    iterated one-at-a-time, producing individual Y/X planes.
+    Dimensions of length 1 are skipped when the parent image uses squeeze
+    (the default).
+    ``squeeze`` controls only how each chunk presents its dimensions:
+    size-1 axes are dropped when ``True`` (default) and retained
+    when ``False``.
+    Spatial dimensions (Y, X) are always kept in full unless
+    explicitly tiled with an ``int`` value.
 
     Parameters:
         image:
             Source CziImage.
+        sizes:
+            Chunk size specification as mapping of dimension name to
+            ``int`` or ``None``.
+            Values control behavior:
+
+            - *Absent* non-spatial dimension: iterated one-at-a-time.
+            - *Absent* spatial dimension (Y, X): kept in full.
+            - ``None`` value: full axis kept in each chunk.
+            - ``int`` value: axis batched into groups of that size.
+              For spatial dimensions, this produces a tiling grid.
+        squeeze:
+            Whether to drop size-1 dimensions from each chunk.
 
     """
 
     _image: CziImage
-    _maxworkers: int
+    _sizes: dict[str, int | None]
+    _squeeze: bool
 
     def __init__(
         self,
         image: CziImage,
+        sizes: dict[str, int | None] | None = None,
         /,
         *,
-        maxworkers: int | None = None,
+        squeeze: bool = True,
     ) -> None:
         self._image = image
-        if maxworkers is None:
-            maxworkers = image._default_maxworkers
-            if maxworkers > 1:
-                # single-position: at most one tile per plane, no benefit from
-                # threading within _read_plane
-                n_planes = 1
-                for d, s in image._raw_sizes.items():
-                    if d not in ('Y', 'X', 'S'):
-                        n_planes *= s
-                if len(image._entries) <= n_planes:
-                    maxworkers = 1
-        self._maxworkers = maxworkers
+        self._squeeze = squeeze
+        if sizes is None:
+            sizes = {}
+        raw = image._raw_sizes
+        for dim, val in sizes.items():
+            if dim == 'S':
+                msg = f'chunk size for sample dimension {dim!r} not supported'
+                raise ValueError(msg)
+            if dim not in raw:
+                msg = f'unknown dimension {dim!r}'
+                raise ValueError(msg)
+            if val is not None and not isinstance(val, int):
+                msg = (  # type: ignore[unreachable]
+                    f'chunk size for {dim!r} must be int or None,'
+                    f' got {type(val).__name__}'
+                )
+                raise TypeError(msg)
+            if isinstance(val, int) and val < 1:
+                msg = f'chunk size for {dim!r} must be positive, got {val}'
+                raise ValueError(msg)
+        self._sizes = dict(sizes)
 
-    def __call__(
-        self,
-        *,
-        maxworkers: int | None = None,
-    ) -> CziImagePlanes:
-        """Return a new CziImagePlanes with a different maxworkers setting.
+    def __len__(self) -> int:
+        """Number of chunks."""
+        _, combos, grid = self._chunk_axes
+        n = len(combos)
+        if grid is not None:
+            n *= len(grid)
+        return n
 
-        Parameters:
-            maxworkers:
-                Maximum number of threads to decode subblock data.
-                By default, up to half the CPU cores are used.
+    def __iter__(self) -> Iterator[CziImage]:
+        """Iterate over chunks as CziImage views."""
+        iter_dims, combos, grid = self._chunk_axes
+        image = self._image
+        sizes = self._sizes
+        parent = image._parent
+        squeeze = self._squeeze
+        pixeltype = image._pixeltype
+        storedsize = image._storedsize
+        parent_selection = image._selection
+        entries_all = image._entries
 
-        Example::
+        layout = image._subblock_layout
+        xi = layout.x_idx
+        yi = layout.y_idx
 
-            plane = img.planes(maxworkers=8)[0, 0]
-            for plane in img(C=None, Z=None).planes(maxworkers=8):
-                process(plane)
+        # precompute selection key ordering once (image._dim_order is fixed)
+        parent_rank = {d: i for i, d in enumerate(image._dim_order)}
 
-        """
-        return CziImagePlanes(self._image, maxworkers=maxworkers)
+        # Fast path for integer-only combos: build a dict that maps each
+        # combination of iterated-dimension coordinates to the matching
+        # entries, replacing the sequential O(N) linear scans per combo
+        # with an O(1) dict lookup.
+        entries_by_combo: (
+            dict[tuple[int | slice, ...], tuple[CziDirectoryEntryDV, ...]]
+            | None
+        ) = None
+        if iter_dims and not any(
+            isinstance(v, slice) for combo in combos for v in combo
+        ):
+            _build: dict[tuple[int, ...], list[CziDirectoryEntryDV]] = {}
+            try:
+                for e in entries_all:
+                    key = tuple(e.start[e.dims.index(d)] for d in iter_dims)
+                    _build.setdefault(key, []).append(e)
+                entries_by_combo = {k: tuple(v) for k, v in _build.items()}
+            except (ValueError, IndexError):
+                pass  # entry missing an iterated dim; fall back to scan
+
+        no_entries: tuple[CziDirectoryEntryDV, ...] = ()
+
+        for combo in combos:
+            # filter entries by iterated dimension coordinates
+            selection: dict[str, SelectionValue] = dict(parent_selection)
+            entries: tuple[CziDirectoryEntryDV, ...] = entries_all
+
+            if entries_by_combo is not None:
+                # O(1) lookup replacing sequential O(N) scans
+                entries = entries_by_combo.get(combo, no_entries)
+                selection.update(zip(iter_dims, combo, strict=True))
+            else:
+                for dim, val in zip(iter_dims, combo, strict=True):
+                    if isinstance(val, int):
+                        entries = tuple(
+                            e
+                            for e in entries
+                            if dim in e.dims
+                            and e.start[e.dims.index(dim)] == val
+                        )
+                        selection[dim] = val
+                    elif isinstance(val, slice):
+                        r = range(val.start, val.stop)
+                        entries = tuple(
+                            e
+                            for e in entries
+                            if dim in e.dims
+                            and e.start[e.dims.index(dim)] in r
+                        )
+                        selection[dim] = val
+
+            # add None for dims kept in chunk
+            for dim, sz in sizes.items():
+                if sz is None and dim not in ('Y', 'X', 'S'):
+                    selection[dim] = None
+
+            if not entries:
+                continue
+
+            # reorder selection keys to match parent dim order so that
+            # the chunk's _dim_order follows the parent's dimension order
+            selection = dict(
+                sorted(
+                    selection.items(),
+                    key=lambda kv: parent_rank.get(kv[0], len(parent_rank)),
+                )
+            )
+
+            # build name parts from iteration coordinates
+            parts: list[str] = []
+            if image._name:
+                parts.append(image._name)
+            sel_parts = [
+                f'{d}={v!r}' for d, v in zip(iter_dims, combo, strict=True)
+            ]
+            if sel_parts:
+                parts.append(', '.join(sel_parts))
+
+            if grid is not None:
+                # Use the image's cached spatial index when entries are
+                # unfiltered (i.e. no non-spatial dim selection was applied),
+                # avoiding an O(N) linear scan per grid tile.
+                use_spi = (entries is entries_all) and xi >= 0
+                for roi in grid:
+                    rx, ry, rw, rh = roi
+                    if use_spi:
+                        roi_entries: tuple[CziDirectoryEntryDV, ...] = tuple(
+                            image._spatial_index_filter(rx, ry, rw, rh)
+                        )
+                    else:
+                        roi_entries = tuple(
+                            e
+                            for e in entries
+                            if (
+                                xi < 0
+                                or not (
+                                    e.start[xi] + e.shape[xi] <= rx
+                                    or e.start[xi] >= rx + rw
+                                )
+                            )
+                            and (
+                                yi < 0
+                                or not (
+                                    e.start[yi] + e.shape[yi] <= ry
+                                    or e.start[yi] >= ry + rh
+                                )
+                            )
+                        )
+                    if not roi_entries:
+                        continue
+                    roi_parts = list(parts)
+                    roi_parts.append(f'roi={roi!r}')
+                    name = ' '.join(roi_parts)
+                    yield CziImage(
+                        parent,
+                        roi_entries,
+                        name=name,
+                        squeeze=squeeze,
+                        roi=roi,
+                        pixeltype=pixeltype,
+                        storedsize=storedsize,
+                        selection=selection or None,
+                    )
+            else:
+                name = ' '.join(parts) if parts else ''
+                yield CziImage(
+                    parent,
+                    entries,
+                    name=name,
+                    squeeze=squeeze,
+                    roi=image._roi,
+                    pixeltype=pixeltype,
+                    storedsize=storedsize,
+                    selection=selection or None,
+                )
 
     @cached_property
-    def _info(
+    def _chunk_axes(
         self,
     ) -> tuple[
         tuple[str, ...],
-        dict[str, tuple[int, ...]],
-        tuple[tuple[int, ...], ...],
-        dict[str, int],
+        tuple[tuple[int | slice, ...], ...],
+        tuple[tuple[int, int, int, int], ...] | None,
     ]:
-        """Return (dims, dim_values, coordinate_tuples, fixed_coords).
+        """Return (iter_dims, coord_combos, spatial_grid).
 
-        dims:
-            Visible iteration dimension names in order (unspecified
-            first in file order, then specified in kwargs order).
-            Size-1 dims are excluded when squeeze is enabled.
-        dim_values:
-            Mapping of visible dimension name to coordinate values.
-        coordinate_tuples:
-            Product of dim_values, one tuple per plane.
-        fixed_coords:
-            Mapping of squeezed-out dimension name to its single
-            coordinate value. Included in all _read_plane calls.
+        iter_dims:
+            Non-spatial dimension names that are iterated.
+        coord_combos:
+            Cartesian product of coordinate values or slices for each
+            iterated dimension.
+        spatial_grid:
+            Tuple of ``(x, y, w, h)`` ROI tuples for spatial tiling
+            in absolute CZI pixel coordinates, or ``None`` when no
+            spatial tiling is requested.
 
         """
         raw = self._image._raw_sizes
-        start = self._image._start
+        start_tuple = self._image._start
         dim_list = list(raw.keys())
-        squeeze = self._image._squeeze
         dim_order = self._image._dim_order
+        parent_squeeze = self._image._squeeze
+        sizes = self._sizes
+        spatial_dims = {'Y', 'X', 'S'}
 
-        # plane dimensions are Y, X, and S when present
-        plane_dims = {'Y', 'X', 'S'}
+        iter_dims: list[str] = []
+        iter_values: list[list[Any]] = []
 
-        # iteration dimensions in the order from _dim_order
-        all_iter_dims = tuple(d for d in dim_order if d not in plane_dims)
-
-        # compute coordinate values for all iteration dimensions
-        all_dim_values: dict[str, tuple[int, ...]] = {}
-        for dim in all_iter_dims:
+        for dim in dim_order:
+            if dim in spatial_dims:
+                continue
             dim_idx = dim_list.index(dim)
-            dim_start = start[dim_idx]
+            dim_start = start_tuple[dim_idx]
             dim_size = raw[dim]
-            all_dim_values[dim] = tuple(range(dim_start, dim_start + dim_size))
 
-        # separate into visible and fixed (squeezed-out) dims
-        fixed_coords: dict[str, int] = {}
-        dims: list[str] = []
-        dim_values: dict[str, tuple[int, ...]] = {}
-
-        for d in all_iter_dims:
-            vals = all_dim_values[d]
-            if squeeze and len(vals) <= 1:
-                if vals:
-                    fixed_coords[d] = vals[0]
+            if dim in sizes:
+                if sizes[dim] is None:
+                    continue
+                # batch by sizes[dim]
+                batch: int = sizes[dim]  # type: ignore[assignment]
+                vals: list[int | slice] = []
+                for b in range(dim_start, dim_start + dim_size, batch):
+                    b_end = min(b + batch, dim_start + dim_size)
+                    vals.append(slice(b, b_end))
+                iter_dims.append(dim)
+                iter_values.append(vals)
             else:
-                dims.append(d)
-                dim_values[d] = vals
+                # iterate one-at-a-time
+                coord_vals = list(range(dim_start, dim_start + dim_size))
+                if parent_squeeze and len(coord_vals) <= 1:
+                    continue
+                iter_dims.append(dim)
+                iter_values.append(coord_vals)
 
-        dims_tuple = tuple(dims)
-
-        # cartesian product of visible dimension values
-        if dims_tuple:
-            coords = tuple(
-                itertools.product(*(dim_values[d] for d in dims_tuple))
-            )
+        if iter_dims:
+            coord_combos = tuple(itertools.product(*iter_values))
         else:
-            coords = ((),)
+            coord_combos = ((),)
 
-        return dims_tuple, dim_values, coords, fixed_coords
+        # spatial tiling grid
+        tile_x = sizes.get('X')
+        tile_y = sizes.get('Y')
+        spatial_grid: tuple[tuple[int, int, int, int], ...] | None = None
 
-    @property
-    def _raw_plane_sizes(self) -> dict[str, int]:
-        """Unsqueezed sizes of plane dimensions (for tile compositing)."""
-        raw = self._image._raw_sizes
-        roi = self._image._roi
-        result: dict[str, int] = {}
-        if 'Y' in raw:
-            result['Y'] = roi[3] if roi is not None else raw['Y']
-        if 'X' in raw:
-            result['X'] = roi[2] if roi is not None else raw['X']
-        if 'S' in raw:
-            result['S'] = raw['S']
-        return result
+        if tile_x is not None or tile_y is not None:
+            if self._image._roi is not None:
+                ext_x, ext_y, ext_w, ext_h = self._image._roi
+            else:
+                abs_start = filtered_start(self._image._entries)
+                abs_shape = filtered_shape(self._image._entries, abs_start)
+                xi = dim_list.index('X') if 'X' in dim_list else -1
+                yi = dim_list.index('Y') if 'Y' in dim_list else -1
+                ext_x = abs_start[xi] if xi >= 0 else 0
+                ext_y = abs_start[yi] if yi >= 0 else 0
+                ext_w = abs_shape[xi] if xi >= 0 else 0
+                ext_h = abs_shape[yi] if yi >= 0 else 0
 
-    def _read_plane(
-        self,
-        coord: dict[str, int],
-        /,
-        *,
-        out: NDArray[Any] | None = None,
-    ) -> NDArray[Any]:
-        """Read a single plane for given dimension coordinates.
+            # step sizes in absolute CZI coordinates
+            step_x = tile_x if tile_x is not None else ext_w
+            step_y = tile_y if tile_y is not None else ext_h
 
-        Parameters:
-            coord:
-                Mapping of iteration dimension name to coordinate value.
-            out:
-                Optional pre-allocated output array.
+            # scale tile sizes for pyramid levels and storedsize
+            sf = self._image._scale_factors
+            ss_sf = self._image._storedsize_scale
+            layout = self._image._subblock_layout
+            if layout.is_pyramid_level and sf:
+                x_di = layout.x_idx
+                y_di = layout.y_idx
+                if x_di >= 0 and tile_x is not None:
+                    step_x = round(step_x * sf[x_di])
+                if y_di >= 0 and tile_y is not None:
+                    step_y = round(step_y * sf[y_di])
+            elif self._image._storedsize and bool(ss_sf):
+                x_di = layout.x_idx
+                y_di = layout.y_idx
+                if x_di >= 0 and tile_x is not None:
+                    step_x = round(step_x / ss_sf[x_di])
+                if y_di >= 0 and tile_y is not None:
+                    step_y = round(step_y / ss_sf[y_di])
 
-        """
-        raw = self._image._raw_sizes
-        dims = tuple(raw.keys())
-        roi = self._image._roi
+            grid: list[tuple[int, int, int, int]] = []
+            for y in range(ext_y, ext_y + ext_h, step_y):
+                for x in range(ext_x, ext_x + ext_w, step_x):
+                    w = min(step_x, ext_x + ext_w - x)
+                    h = min(step_y, ext_y + ext_h - y)
+                    grid.append((x, y, w, h))
+            spatial_grid = tuple(grid)
 
-        # filter entries matching coordinate
-        entries = self._image._entries
-        for dim, val in coord.items():
-            dim_idx = dims.index(dim)
-            entries = tuple(e for e in entries if e.start[dim_idx] == val)
-
-        # determine plane shape (unsqueezed for compositing)
-        ps = self._raw_plane_sizes
-        plane_shape = tuple(ps.values())
-
-        if out is not None:
-            out[:] = 0
-
-        raw_out = numpy.zeros(plane_shape, dtype=self._image.dtype)
-
-        if not entries:
-            if out is not None:
-                return out
-            return raw_out.squeeze() if self._image._squeeze else raw_out
-
-        # compute global start for plane dimensions
-        start = self._image._start
-        sf = self._image._scale_factors
-        layout = self._image._subblock_layout
-        is_pyramid_level = layout.is_pyramid_level
-        is_upsampled = layout.is_upsampled
-        is_downsampled = layout.is_downsampled
-        ss_sf = self._image._storedsize_scale
-        use_storedsize = self._image._storedsize and bool(ss_sf)
-        if roi is not None:
-            roi_x, roi_y, roi_w, roi_h = roi
-            if is_pyramid_level:
-                x_raw_idx = layout.x_idx
-                y_raw_idx = layout.y_idx
-                if x_raw_idx >= 0:
-                    roi_x = round(roi_x / sf[x_raw_idx])
-                    roi_w = round(roi_w / sf[x_raw_idx])
-                if y_raw_idx >= 0:
-                    roi_y = round(roi_y / sf[y_raw_idx])
-                    roi_h = round(roi_h / sf[y_raw_idx])
-            elif use_storedsize:
-                x_raw_idx = layout.x_idx
-                y_raw_idx = layout.y_idx
-                if x_raw_idx >= 0:
-                    roi_x = round(roi_x * ss_sf[x_raw_idx])
-                    roi_w = round(roi_w * ss_sf[x_raw_idx])
-                if y_raw_idx >= 0:
-                    roi_y = round(roi_y * ss_sf[y_raw_idx])
-                    roi_h = round(roi_h * ss_sf[y_raw_idx])
-        else:
-            roi_x = roi_y = 0
-
-        # Precompute inverse ss_sf for start coordinate mapping
-        inv_ss_sf = tuple(1.0 / f for f in ss_sf) if use_storedsize else ()
-
-        dest_pixeltype = self._image.pixeltype
-
-        def func(entry: CziDirectoryEntryDV) -> None:
-            subblock = entry.read_segment_data(self._image._parent)
-            if not isinstance(subblock, CziSubBlockSegmentData):
-                return
-            data, e_start, _ = prepare_subblock(
-                subblock,
-                entry,
-                dims,
-                dest_pixeltype,
-                is_upsampled,
-                is_downsampled,
-                use_storedsize,
-            )
-
-            # build slices for each plane dim
-            out_slices: list[slice] = []
-            data_slices: list[slice] = []
-
-            skip = False
-            for pdim in ps:
-                pdim_idx_raw = dims.index(pdim)
-                entry_start = e_start[pdim_idx_raw]
-                entry_size = data.shape[pdim_idx_raw]
-                if is_pyramid_level:
-                    entry_start = round(entry_start / sf[pdim_idx_raw])
-                elif use_storedsize:
-                    entry_start = round(entry_start / inv_ss_sf[pdim_idx_raw])
-
-                if pdim in ('Y', 'X'):
-                    if roi is not None:
-                        origin = roi_y if pdim == 'Y' else roi_x
-                        extent = roi_h if pdim == 'Y' else roi_w
-                    else:
-                        origin = start[pdim_idx_raw]
-                        extent = raw[pdim]
-
-                    # intersection of tile and output
-                    out_start = max(entry_start - origin, 0)
-                    out_end = min(entry_start + entry_size - origin, extent)
-                    if out_start >= out_end:
-                        skip = True
-                        break
-                    data_start = max(origin - entry_start, 0)
-                    data_end = data_start + (out_end - out_start)
-                else:
-                    # S dimension
-                    origin = start[pdim_idx_raw]
-                    out_start = entry_start - origin
-                    out_end = out_start + entry_size
-                    data_start = 0
-                    data_end = entry_size
-
-                out_slices.append(slice(out_start, out_end))
-                data_slices.append(slice(data_start, data_end))
-
-            if skip or not out_slices:
-                return
-
-            # squeeze out non-plane dims from tile data
-            if data.ndim > len(out_slices):
-                squeeze_dims = tuple(
-                    i
-                    for i, d in enumerate(dims)
-                    if d not in ps and data.shape[i] == 1
-                )
-                if squeeze_dims:
-                    data = data.squeeze(axis=squeeze_dims)
-                while data.ndim > len(out_slices):
-                    data = data[0]
-
-            raw_out[tuple(out_slices)] = data[tuple(data_slices)]
-
-        if self._maxworkers > 1:
-            self._image._parent.set_lock(True)
-            try:
-                with ThreadPoolExecutor(self._maxworkers) as executor:
-                    for _ in executor.map(func, entries):
-                        pass
-            finally:
-                self._image._parent.set_lock(False)
-        else:
-            for entry in entries:
-                func(entry)
-
-        result = raw_out.squeeze() if self._image._squeeze else raw_out
-
-        if out is not None:
-            out[()] = result
-            return out
-        return result
-
-    def __len__(self) -> int:
-        """Number of planes."""
-        _, _, coords, _ = self._info
-        return len(coords)
-
-    def __getitem__(self, index: int | tuple[int, ...], /) -> NDArray[Any]:
-        """Return plane data by linear index or coordinate-value tuple.
-
-        Parameters:
-            index:
-                ``int``: selects the n-th plane in iteration order.
-                ``tuple[int, ...]``: selects by absolute coordinate values,
-                one per visible iteration dimension (the same elements as
-                the tuples returned by :py:meth:`keys`).
-                The values must be absolute CZI file-level coordinates,
-                matching the first element of pairs returned by
-                :py:meth:`items`.
-
-        """
-        dims, dim_values, coords, fixed = self._info
-        if isinstance(index, tuple):
-            if len(index) != len(dims):
-                msg = (
-                    f'expected {len(dims)} absolute coordinates for {dims=}, '
-                    f'got {len(index)}'
-                )
-                raise IndexError(msg)
-            coord = dict(zip(dims, index, strict=True))
-            for d, v in coord.items():
-                if v not in dim_values[d]:
-                    msg = f'coordinate {d}={v} not in {dim_values[d]}'
-                    raise IndexError(msg)
-            coord.update(fixed)
-            return self._read_plane(coord)
-        # linear index
-        if index < 0:
-            index += len(coords)
-        if index < 0 or index >= len(coords):
-            msg = f'plane index {index} out of range [0, {len(coords)})'
-            raise IndexError(msg)
-        coord = dict(zip(dims, coords[index], strict=True))
-        coord.update(fixed)
-        return self._read_plane(coord)
-
-    def keys(self) -> Iterator[tuple[int, ...]]:
-        """Iterate over absolute coordinate tuples for each plane.
-
-        Each tuple contains one absolute CZI coordinate per iteration
-        dimension, in the same order as the visible non-spatial iteration
-        dimensions of this :py:class:`CziImagePlanes` view.
-        Spatial dimensions (Y, X, and optional S) and squeezed singleton
-        dimensions are excluded.
-        These are the same values accepted by :py:meth:`__getitem__`.
-
-        """
-        _, _, coords, _ = self._info
-        yield from coords
-
-    def values(self) -> Iterator[NDArray[Any]]:
-        """Iterate over plane data arrays in iteration order."""
-        yield from self
-
-    def items(self) -> Iterator[tuple[tuple[int, ...], NDArray[Any]]]:
-        """Iterate over (absolute_coordinate_tuple, plane_data) pairs.
-
-        Coordinate values are absolute CZI file-level indices, not zero-based
-        positional offsets. For example, if the file's T axis starts at 5
-        the first tuple will contain ``(5, ...)`` not ``(0, ...)``.
-        The coordinate order follows the iteration-dimension order of
-        the source :py:class:`CziImage` (see :py:meth:`CziImage.__call__`).
-
-        """
-        dims, _, coords, fixed = self._info
-        for coord_vals in coords:
-            coord = dict(zip(dims, coord_vals, strict=True))
-            coord.update(fixed)
-            yield coord_vals, self._read_plane(coord)
-
-    def __iter__(self) -> Iterator[NDArray[Any]]:
-        """Iterate over all planes in iteration-dimension order.
-
-        The iteration order is determined by the source :py:class:`CziImage`:
-        unspecified non-spatial dimensions come first (in file order),
-        then dimensions passed as ``None`` to :py:meth:`CziImage.__call__`
-        (in kwargs order). To control the order explicitly, call
-        :py:meth:`CziImage.__call__` with the desired ``None``-valued kwargs
-        before accessing :py:attr:`CziImage.planes`.
-
-        """
-        dims, _, coords, fixed = self._info
-        for coord_vals in coords:
-            coord = dict(zip(dims, coord_vals, strict=True))
-            coord.update(fixed)
-            yield self._read_plane(coord)
+        return tuple(iter_dims), coord_combos, spatial_grid
 
     def __repr__(self) -> str:
-        _, _, coords, _ = self._info
-        dims = ', '.join(f'{k}: {v}' for k, v in self._image.sizes.items())
-        return (
-            f'<{self.__class__.__name__} '
-            f'{len(coords)} planes ({dims}) {self._image.dtype}>'
-        )
+        dims = ', '.join(f'{k}: {v}' for k, v in self._sizes.items())
+        return f'<{self.__class__.__name__} {len(self)} chunks ({dims})>'
 
 
 class CziScenes(collections.abc.Mapping[int, CziImage]):
@@ -3177,98 +3287,13 @@ class CziScenes(collections.abc.Mapping[int, CziImage]):
             if entry.pyramid_type == 0:
                 indices.add(entry.scene_index)
         if indices == {-1}:
-            # No explicit S dimension: single implicit scene, exposed as key 0
+            # no explicit S dimension: single implicit scene, exposed as key 0
             self._scene_indices = (0,)
             self._implicit = True
         else:
             # explicit scenes: use actual S-coordinate values as keys
             self._scene_indices = tuple(sorted(indices - {-1}))
             self._implicit = False
-
-    def _make_image(self, key: int, /) -> CziImage:
-        """Create a CziImage for the given scene key."""
-        if self._implicit:
-            entries = tuple(
-                e
-                for e in self._parent.filtered_subblock_directory
-                if e.pyramid_type == 0
-            )
-        else:
-            entries = tuple(
-                e
-                for e in self._parent.filtered_subblock_directory
-                if e.pyramid_type == 0 and e.scene_index in (-1, key)
-            )
-        name = f'Scene {key}'
-        if not entries:
-            raise KeyError(key)
-        image = CziImage(
-            self._parent,
-            entries,
-            name=name,
-            squeeze=self._squeeze,
-        )
-        # populate pyramid levels
-        if self._implicit:
-            pyramid_entries = [
-                e
-                for e in self._parent.subblock_directory
-                if e.pyramid_type != 0
-            ]
-        else:
-            pyramid_entries = [
-                e
-                for e in self._parent.subblock_directory
-                if e.pyramid_type != 0 and e.scene_index in (-1, key)
-            ]
-        if pyramid_entries:
-            # group by scale factor
-            levels_by_scale: dict[
-                tuple[float, ...], list[CziDirectoryEntryDV]
-            ] = {}
-            for e in pyramid_entries:
-                lkey = normalize_pyramid_scale(e.scale)
-                levels_by_scale.setdefault(lkey, []).append(e)
-            for scale in sorted(levels_by_scale):
-                level_entries = tuple(levels_by_scale[scale])
-                level = CziImage(
-                    self._parent,
-                    level_entries,
-                    name=f'{name} level {len(image._levels)}',
-                    squeeze=self._squeeze,
-                )
-                image._levels.append(level)
-        return image
-
-    def _resolve_keys(self, scene: SelectionValue, /) -> tuple[int, ...]:
-        """Resolve scene argument to a tuple of valid scene keys."""
-        if scene is None:
-            return self._scene_indices
-        if isinstance(scene, int):
-            if scene not in self._scene_indices:
-                msg = (
-                    f'scene key {scene!r} not found: '
-                    f'available {self._scene_indices}'
-                )
-                raise KeyError(msg)
-            return (scene,)
-        if isinstance(scene, slice):
-            # interpret as absolute S-coordinate range, consistent with int
-            selected = set(range(*scene.indices(self._scene_indices[-1] + 1)))
-            result = tuple(s for s in self._scene_indices if s in selected)
-            if not result:
-                raise KeyError(scene)
-            return result
-        keys: list[int] = []
-        for s in scene:
-            if s not in self._scene_indices:
-                msg = (
-                    f'scene key {s!r} not found: '
-                    f'available {self._scene_indices}'
-                )
-                raise KeyError(msg)
-            keys.append(s)
-        return tuple(keys)
 
     def __call__(
         self,
@@ -3359,6 +3384,91 @@ class CziScenes(collections.abc.Mapping[int, CziImage]):
     def __len__(self) -> int:
         """Number of scenes."""
         return len(self._scene_indices)
+
+    def _make_image(self, key: int, /) -> CziImage:
+        """Create a CziImage for the given scene key."""
+        if self._implicit:
+            entries = tuple(
+                e
+                for e in self._parent.filtered_subblock_directory
+                if e.pyramid_type == 0
+            )
+        else:
+            entries = tuple(
+                e
+                for e in self._parent.filtered_subblock_directory
+                if e.pyramid_type == 0 and e.scene_index in (-1, key)
+            )
+        name = f'Scene {key}'
+        if not entries:
+            raise KeyError(key)
+        image = CziImage(
+            self._parent,
+            entries,
+            name=name,
+            squeeze=self._squeeze,
+        )
+        # populate pyramid levels
+        if self._implicit:
+            pyramid_entries = [
+                e
+                for e in self._parent.subblock_directory
+                if e.pyramid_type != 0
+            ]
+        else:
+            pyramid_entries = [
+                e
+                for e in self._parent.subblock_directory
+                if e.pyramid_type != 0 and e.scene_index in (-1, key)
+            ]
+        if pyramid_entries:
+            # group by scale factor
+            levels_by_scale: dict[
+                tuple[float, ...], list[CziDirectoryEntryDV]
+            ] = {}
+            for e in pyramid_entries:
+                lkey = normalize_pyramid_scale(e.scale)
+                levels_by_scale.setdefault(lkey, []).append(e)
+            for scale in sorted(levels_by_scale):
+                level_entries = tuple(levels_by_scale[scale])
+                level = CziImage(
+                    self._parent,
+                    level_entries,
+                    name=f'{name} level {len(image._levels)}',
+                    squeeze=self._squeeze,
+                )
+                image._levels.append(level)
+        return image
+
+    def _resolve_keys(self, scene: SelectionValue, /) -> tuple[int, ...]:
+        """Resolve scene argument to a tuple of valid scene keys."""
+        if scene is None:
+            return self._scene_indices
+        if isinstance(scene, int):
+            if scene not in self._scene_indices:
+                msg = (
+                    f'scene key {scene!r} not found: '
+                    f'available {self._scene_indices}'
+                )
+                raise KeyError(msg)
+            return (scene,)
+        if isinstance(scene, slice):
+            # interpret as absolute S-coordinate range, consistent with int
+            selected = set(range(*scene.indices(self._scene_indices[-1] + 1)))
+            result = tuple(s for s in self._scene_indices if s in selected)
+            if not result:
+                raise KeyError(scene)
+            return result
+        keys: list[int] = []
+        for s in scene:
+            if s not in self._scene_indices:
+                msg = (
+                    f'scene key {s!r} not found: '
+                    f'available {self._scene_indices}'
+                )
+                raise KeyError(msg)
+            keys.append(s)
+        return tuple(keys)
 
     def __repr__(self) -> str:
         return f'<{self.__class__.__name__} {len(self._scene_indices)}>'
@@ -3612,7 +3722,7 @@ class CziMetadataSegmentData(CziSegmentData):
 
 
 class CziSubBlockSegmentData(CziSegmentData):
-    """ZISRAWSUBBLOCK segment data, aka ImageSubBlock.
+    """ZISRAWSUBBLOCK segment data (ImageSubBlock).
 
     Contains XML metadata, optional attachments, and homogeneous,
     contiguous pixel data.
@@ -3671,6 +3781,16 @@ class CziSubBlockSegmentData(CziSegmentData):
     def segment(self) -> CziSegment:
         """Parent segment associated with data."""
         return self._segment
+
+    @property
+    def directory_entry_offset(self) -> int:
+        """Position of inline directory entry in file."""
+        return self._segment.data_offset + 16
+
+    @property
+    def metadata_offset(self) -> int:
+        """Position of metadata section in file."""
+        return self.data_offset - self.metadata_size
 
     @overload
     def metadata(
@@ -3786,7 +3906,9 @@ class CziSubBlockSegmentData(CziSegmentData):
                     else:
                         break
                 offset = header_size
-                image = decode(data[offset:], out=size)
+                # Use memoryview to avoid copying compressed bytes
+                # when skipping the small fixed-size ZSTD1 header.
+                image = decode(memoryview(data)[offset:], out=size)
                 image = numpy.frombuffer(image, dtype)
                 if hilo:
                     image = imagecodecs.byteshuffle_decode(image)
@@ -4092,6 +4214,16 @@ class CziDirectoryEntryDV:
         return 32 + self.dimensions_count * 20
 
     @property
+    def subblock_entry_offset(self) -> int:
+        """Position of inline directory entry within associated subblock.
+
+        Allows accessing dimension start values without going through
+        the SubBlockDirectory.
+
+        """
+        return self.file_position + 48
+
+    @property
     def dtype(self) -> numpy.dtype:
         """Numpy data type of pixel type."""
         return self.pixel_type.dtype
@@ -4147,11 +4279,52 @@ class CziDirectoryEntryDV:
             czifile: CZI file to read from.
 
         """
-        with czifile.lock:
-            segmentdata = CziSegment(czifile, self.file_position).data()
-        if segmentdata.SID == CziSubBlockSegmentData.SID:
-            return cast(CziSubBlockSegmentData, segmentdata)
-        return cast(CziDeletedSegmentData, segmentdata)
+        fh = czifile._fh
+        lock = czifile._lock
+        pos = self.file_position
+        with lock:
+            fh.seek(pos)
+            # All needed header fields fit in the first 48 bytes:
+            # [0:16] SID, [16:32] allocated/used sizes,
+            # [32:48] metadata_size / attachment_size / data_size.
+            header = fh.read(48)
+            # Fast path: segment is a live ZISRAWSUBBLOCK.
+            # Compute data_offset from the already-known storage_size
+            # instead of constructing a new CziDirectoryEntryDV.
+            if header[:14] == b'ZISRAWSUBBLOCK':
+                allocated_size, used_size = struct.unpack_from(
+                    '<qq', header, 16
+                )
+                if used_size == 0:
+                    used_size = allocated_size
+                metadata_size, attachment_size, data_size = struct.unpack_from(
+                    '<iiq', header, 32
+                )
+                storage = self.storage_size  # 32 + dimensions_count * 20
+                data_offset = pos + 48 + max(240, storage) + metadata_size
+                segmentdata = CziSubBlockSegmentData.__new__(
+                    CziSubBlockSegmentData
+                )
+                seg = CziSegment.__new__(CziSegment)
+                seg.sid = CziSegmentId.ZISRAWSUBBLOCK
+                seg.offset = pos
+                seg.allocated_size = allocated_size
+                seg.used_size = used_size
+                seg._czifile = czifile
+                segmentdata._segment = seg
+                segmentdata.directory_entry = self
+                segmentdata.metadata_size = metadata_size
+                segmentdata.attachment_size = attachment_size
+                segmentdata.data_size = data_size
+                segmentdata.data_offset = data_offset
+                return segmentdata
+
+            # slow fallback path: DELETED segment or unexpected type
+            fallback = CziSegment(czifile, pos).data()
+
+        if fallback.SID == CziSubBlockSegmentData.SID:
+            return cast(CziSubBlockSegmentData, fallback)
+        return cast(CziDeletedSegmentData, fallback)
 
     def __repr__(self) -> str:
         return f'<{self.__class__.__name__} @ {self.offset}>'
@@ -4483,6 +4656,11 @@ class CziAttachmentEntryA1:
         ext = self.content_file_type.name.lower()
         return f'{self.name}@{self.file_position}.{ext}'
 
+    @property
+    def name_offset(self) -> int:
+        """Position of name field in file (80 bytes, zero-padded)."""
+        return self.offset + 48
+
     def read_segment_data(
         self,
         czifile: CziFile,
@@ -4736,16 +4914,6 @@ class CziSubBlockLayout:
         )
 
 
-class NullLock:
-    """No-op context manager used as default lock."""
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        pass
-
-
 def read_event_list(
     fh: IO[bytes], size: int = 0, /
 ) -> tuple[CziEventListEntry, ...]:
@@ -4943,6 +5111,16 @@ class CziSegmentId(enum.StrEnum):
         obj.read_segment_data = read_segment_data
         return obj
 
+    @property
+    def packed(self) -> bytes:
+        """Segment ID as 16-byte little-endian field.
+
+        Return the identifier encoded as cp1252 and zero-padded to
+        16 bytes, matching the on-disk segment header layout.
+
+        """
+        return self.encode('cp1252').ljust(16, b'\x00')
+
     @classmethod
     def _missing_(cls, value: object, /) -> Self:
         if not isinstance(value, str):
@@ -5050,7 +5228,7 @@ class CziDimensionType(enum.StrEnum):
     """Slice index in Z direction."""
 
     CHANNEL = 'C'
-    """Channel in a multi-channel data set."""
+    """Channel in multi-channel data set."""
 
     TIME = 'T'
     """Sequentially acquired series of data."""
@@ -5059,7 +5237,7 @@ class CziDimensionType(enum.StrEnum):
     """Data is recorded from various angles."""
 
     SCENE = 'S'
-    """Cluster index contiguous region in a mosaic image."""
+    """Cluster index contiguous region in mosaic image."""
 
     ILLUMINATION = 'I'
     """Illumination direction index."""
@@ -5530,96 +5708,7 @@ CONVERT_PIXELTYPE: Mapping[
         # (CziPixelType.BGRA32, CziPixelType.BGRA32)
     }
 )
-
-
-def prepare_subblock(
-    subblock: CziSubBlockSegmentData,
-    entry: CziDirectoryEntryDV,
-    dims: tuple[str, ...],
-    pixeltype: CziPixelType,
-    is_upsampled: bool,  # noqa: FBT001
-    is_downsampled: bool,  # noqa: FBT001
-    storedsize: bool = False,  # noqa: FBT001, FBT002
-    /,
-) -> tuple[NDArray[Any], tuple[int, ...], tuple[float, ...]]:
-    """Decode subblock, convert pixel type, resample, and normalize dims.
-
-    Shared by CziImage.asarray and CziImagePlanes._read_plane.
-
-    Parameters:
-        subblock: Decoded subblock data.
-        entry: Directory entry for the subblock.
-        dims: Reference dimension names in output order.
-        pixeltype: Target pixel type for conversion.
-        is_upsampled: Image-level flag (Airyscan stored sub-sampled).
-        is_downsampled: Image-level flag (PALM stored super-resolution).
-        storedsize: Skip resampling, return tile at stored size.
-
-    Returns:
-        Tuple of (tile, entry_start, entry_sf) normalized to dims order.
-        tile: Decoded, converted, and resampled pixel data.
-        entry_start: Start indices in dims order.
-        entry_sf: Per-axis scale factors in dims order, or () if not
-            upsampled (used by the caller for mask upsampling).
-
-    """
-    tile = subblock.data()
-    if entry.pixel_type != pixeltype:
-        converter = CONVERT_PIXELTYPE.get((entry.pixel_type, pixeltype))
-        if converter is not None:
-            tile = converter(tile)
-
-    entry_sf: tuple[float, ...] = ()
-    if not storedsize and (
-        is_upsampled or is_downsampled or entry.stored_shape != entry.shape
-    ):
-        # Per-entry scale factors for shape vs stored_shape.
-        esf = tuple(
-            float(s) / float(ss) if ss > 0 else 1.0
-            for s, ss in zip(entry.shape, entry.stored_shape, strict=True)
-        )
-        if is_upsampled:
-            # Airyscan may mix compressed tiles (e.g. C=0 4x Y)
-            # with full-resolution tiles (e.g. C=1).
-            # Only repeat where this specific entry is sub-sampled.
-            entry_sf = esf
-            for d, f in enumerate(esf):
-                if f > 1.0:
-                    tile = numpy.repeat(tile, round(f), axis=d)
-        else:
-            # PALM super-resolution may mix stored-at-full-res tiles
-            # with super-resolution tiles (e.g. first tile normal,
-            # others 2560x2560 into 256x256).
-            # Downsample each axis using floor-based nearest-neighbour
-            # (exact inverse of numpy.repeat used for upsampling).
-            # Note: only axes where f < 1.0 are downsampled.
-            for d, f in enumerate(esf):
-                if f < 1.0:
-                    n_in = tile.shape[d]
-                    n_out = round(n_in * f)
-                    idx = numpy.floor(
-                        numpy.arange(n_out) * n_in / n_out
-                    ).astype(numpy.intp)
-                    tile = numpy.take(tile, idx, axis=d)
-
-    # Normalize entry to the reference dims.
-    # Some CZI files contain entries with inconsistent dimension sets
-    # (e.g. some tiles include dimension 'B', others do not).
-    # Map start and tile shape to dims by inserting defaults
-    # for missing dims.
-    entry_start: tuple[int, ...]
-    if entry.dims != dims:
-        d_start = dict(zip(entry.dims, entry.start, strict=True))
-        entry_start = tuple(d_start.get(d, 0) for d in dims)
-        d_tile = dict(zip(entry.dims, tile.shape, strict=True))
-        tile = tile.reshape(tuple(d_tile.get(d, 1) for d in dims))
-        if entry_sf:
-            d_sf = dict(zip(entry.dims, entry_sf, strict=True))
-            entry_sf = tuple(d_sf.get(d, 1.0) for d in dims)
-    else:
-        entry_start = entry.start
-
-    return tile, entry_start, entry_sf
+"""Map of (source, target) CziPixelType pairs to converter functions."""
 
 
 def normalize_pyramid_scale(
@@ -5701,6 +5790,16 @@ def match_filename(filename: str, /) -> tuple[str, int]:
     name = match[0] + '.czi'
     part = int(match[1]) if match[1] is not None else 0
     return name, part
+
+
+class NullLock:
+    """No-op context manager used as default lock."""
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        pass
 
 
 def logger() -> logging.Logger:
