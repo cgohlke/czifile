@@ -1,6 +1,12 @@
 Revisions
 =========
 
+2026.3.17
+
+- Add cache for decoded subblock arrays.
+- Prefer imagecodecs' WIC over JPEGXR codec if available.
+- Import imagecodecs functions on demand.
+
 2026.3.15
 
 - Replace CziImagePlanes with CziImageChunks (breaking).
