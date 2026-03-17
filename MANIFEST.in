@@ -5,6 +5,8 @@ include pyproject.toml
 
 include czifile/py.typed
 
+exclude benchmark_czifile_vs_pylibczirw.py
+
 exclude .env
 exclude *.cmd
 exclude *.yaml
@@ -17,6 +19,7 @@ recursive-exclude doc *
 recursive-exclude docs *
 recursive-exclude test *
 recursive-exclude tests *
+recursive-exclude examples *
 
 recursive-exclude * __pycache__
 recursive-exclude * *.py[co]
