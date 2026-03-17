@@ -29,7 +29,7 @@
 
 """Unittests for the czifile package.
 
-:Version: 2026.3.15
+:Version: 2026.3.17
 
 """
 
@@ -83,6 +83,7 @@ from czifile import (
 )
 from czifile.czifile import (
     BinaryFile,
+    DecodeCache,
     NullLock,
     default_maxworkers,
     match_filename,
@@ -3154,6 +3155,161 @@ def test_multiscene_mosaic():
             composite = czi.scenes().asarray(maxworkers=1)
             assert composite.shape == ome_tczyx.shape
             assert numpy.array_equal(composite, ome_tczyx)
+
+
+def test_decode_cache():
+    """Test DecodeCache and CziFile.maxcache behavior."""
+    # DecodeCache unit tests
+    # disabled by default: get and put are no-ops
+    cache = DecodeCache()
+    assert cache.maxsize == 0
+    assert cache.get(1) is None
+    arr = numpy.zeros((2, 2), dtype='uint8')
+    cache.put(1, arr)
+    assert cache.get(1) is None
+
+    # enabled: get/put round-trip
+    cache = DecodeCache(maxsize=3)
+    assert cache.maxsize == 3
+    a0 = numpy.array([0], dtype='uint8')
+    a1 = numpy.array([1], dtype='uint8')
+    a2 = numpy.array([2], dtype='uint8')
+    a3 = numpy.array([3], dtype='uint8')
+    cache.put(0, a0)
+    cache.put(1, a1)
+    cache.put(2, a2)
+    assert cache.get(0) is a0
+    assert cache.get(1) is a1
+    assert cache.get(2) is a2
+
+    # FIFO eviction: inserting a 4th entry evicts the oldest (key 0)
+    cache.put(3, a3)
+    assert cache.get(0) is None
+    assert cache.get(3) is a3
+
+    # resize down: excess entries are evicted
+    cache.resize(1)
+    assert cache.maxsize == 1
+    assert sum(cache.get(k) is not None for k in (1, 2, 3)) == 1
+
+    # resize to 0: disables and clears the cache
+    cache.resize(0)
+    assert cache.maxsize == 0
+    assert cache.get(3) is None
+
+    # resize up from disabled
+    cache.resize(2)
+    assert cache.maxsize == 2
+    cache.put(10, a0)
+    assert cache.get(10) is a0
+
+    # negative maxsize raises
+    with pytest.raises(ValueError, match='maxsize'):
+        cache.resize(-1)
+
+    # scoped_resize: restores previous maxsize on exit
+    cache = DecodeCache(maxsize=2)
+    cache.put(0, a0)
+    with cache.scoped_resize(4):
+        assert cache.maxsize == 4
+        cache.put(1, a1)
+        assert cache.get(1) is a1
+    assert cache.maxsize == 2  # maxsize restored
+    assert cache.get(0) is a0  # original data preserved
+
+    # scoped_resize from disabled: creates a temporary dict that is discarded
+    cache = DecodeCache(maxsize=0)
+    with cache.scoped_resize(4):
+        assert cache.maxsize == 4
+        cache.put(1, a1)
+        assert cache.get(1) is a1
+    assert cache.maxsize == 0  # restored to disabled
+    assert cache.get(1) is None  # temporary dict discarded on exit
+
+    # scoped_resize(0): no-op, cache left unchanged
+    cache = DecodeCache(maxsize=3)
+    cache.put(5, a0)
+    with cache.scoped_resize(0):
+        assert cache.maxsize == 3
+        assert cache.get(5) is a0
+    assert cache.maxsize == 3
+    assert cache.get(5) is a0
+
+    # CziFile.maxcache integration
+    # ExampleZstd.czi: T=2, C=2, Z=3, Y=486, X=1178, Zstd-compressed
+    filename = DATA / 'ExampleZstd.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    # default: maxcache is None (auto mode), cache disabled at rest
+    with CziFile(filename) as czi:
+        assert czi.maxcache is None
+        assert czi._cache.maxsize == 0
+
+        # auto mode: cache enabled while iterating spatial chunks.
+        # subblocks are 256x256; tile 256x256 -> nx=ny=2 -> maxcache=4
+        img = czi.scenes[0]
+        assert img.chunks(Y=256, X=256)._maxcache == 4
+        # batching one non-spatial dim multiplies: C has 2 values -> 4*2=8
+        assert img.chunks(Y=256, X=256, C=2)._maxcache == 8
+        # C=None (keep whole dim in chunk): same factor as C=2 here -> 8
+        assert img.chunks(Y=256, X=256, C=None)._maxcache == 8
+        # Z=2 factor: 4*2=8
+        assert img.chunks(Y=256, X=256, Z=2)._maxcache == 8
+        # C=None + Z=None: 4 * C(2) * Z(3) = 24
+        assert img.chunks(Y=256, X=256, C=None, Z=None)._maxcache == 24
+        # no spatial tiling: cache stays 0
+        assert img.chunks()._maxcache == 0
+
+        chunks_iter = iter(img.chunks(Y=256, X=256))
+        next(chunks_iter)
+        assert czi._cache.maxsize == 4  # cache active inside chunks iterator
+        for _ in chunks_iter:
+            pass
+        assert czi._cache.maxsize == 0  # restored after iteration
+
+        # auto mode with non-spatial chunks: cache stays disabled
+        for _ in img.chunks():
+            assert czi._cache.maxsize == 0
+
+    # maxcache=0: explicit disable, auto mode off
+    with CziFile(filename) as czi:
+        czi.maxcache = 0
+        assert czi.maxcache == 0
+        assert czi._cache.maxsize == 0
+        # even spatial chunks leave cache disabled
+        img = czi.scenes[0]
+        for _ in img.chunks(Y=256, X=256):
+            assert czi._cache.maxsize == 0
+
+    # maxcache=N: explicit persistent FIFO, auto mode off
+    with CziFile(filename) as czi:
+        czi.maxcache = 5
+        assert czi.maxcache == 5
+        assert czi._cache.maxsize == 5
+        img = czi.scenes[0]
+        # cache stays at 5 throughout and after iteration
+        for _ in img.chunks():
+            assert czi._cache.maxsize == 5
+        assert czi._cache.maxsize == 5
+
+    # setting maxcache back to None restores auto mode
+    with CziFile(filename) as czi:
+        czi.maxcache = 10
+        assert czi.maxcache == 10
+        czi.maxcache = None
+        assert czi.maxcache is None
+        assert czi._cache.maxsize == 0
+
+    # data correctness: cached result equals non-cached result
+    with CziFile(filename) as czi:
+        img = czi.scenes[0]
+        arr_no_cache = img.asarray()
+    with CziFile(filename) as czi:
+        czi.maxcache = 8
+        img = czi.scenes[0]
+        arr_with_cache = img.asarray()
+    assert numpy.array_equal(arr_no_cache, arr_with_cache)
 
 
 @pytest.mark.skipif(
