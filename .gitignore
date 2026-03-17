@@ -6,6 +6,7 @@ _*.c
 __pycache__/
 *.py[cod]
 *$py.class
+benchmark_czifile_vs_pylibczirw.py
 
 # C extensions
 *.so
