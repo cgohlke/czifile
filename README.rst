@@ -20,7 +20,7 @@ file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.3.15
+:Version: 2026.3.17
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -51,6 +51,12 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2026.3.17
+
+- Add cache for decoded subblock arrays.
+- Prefer imagecodecs' WIC over JPEGXR codec if available.
+- Import imagecodecs functions on demand.
 
 2026.3.15
 
