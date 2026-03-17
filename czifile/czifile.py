@@ -47,7 +47,7 @@ file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.3.15
+:Version: 2026.3.17
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -78,6 +78,12 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2026.3.17
+
+- Add cache for decoded subblock arrays.
+- Prefer imagecodecs' WIC over JPEGXR codec if available.
+- Import imagecodecs functions on demand.
 
 2026.3.15
 
@@ -363,7 +369,7 @@ View the images and metadata in a CZI file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.3.15'
+__version__ = '2026.3.17'
 
 __all__ = [
     'CONVERT_PIXELTYPE',
@@ -799,6 +805,8 @@ class CziFile(BinaryFile):
     """Global file metadata such as file version and GUID."""
 
     _fh: IO[bytes]
+    _cache: DecodeCache
+    _auto_cache: bool
 
     def __init__(
         self,
@@ -838,6 +846,8 @@ class CziFile(BinaryFile):
         if self.header.update_pending:
             logger().warning('file is pending update')
         self._squeeze = squeeze
+        self._cache = DecodeCache()
+        self._auto_cache = True
 
     def __enter__(self) -> Self:
         super().__enter__()
@@ -861,6 +871,26 @@ class CziFile(BinaryFile):
             fh.flush()
             self.header.update_pending = False
         super().__exit__(exc_type, exc_value, traceback)
+
+    @property
+    def maxcache(self) -> int | None:
+        """Maximum number of decoded subblock arrays to cache.
+
+        ``None`` (default) enables automatic cache management:
+        :py:meth:`CziImage.chunks` activates a scoped cache when
+        spatial tiling is requested and leaves it disabled otherwise.
+        ``0`` explicitly disables caching for all operations.
+        Positive integer sets a persistent FIFO cache of that size.
+        Cache is keyed by file offset and uses FIFO eviction.
+        Caching is only applied to compressed subblocks.
+
+        """
+        return None if self._auto_cache else self._cache.maxsize
+
+    @maxcache.setter
+    def maxcache(self, value: int | None) -> None:
+        self._auto_cache = value is None
+        self._cache.resize(0 if value is None else value)
 
     def segments(
         self, kind: str | Sequence[str] | None = None, /
@@ -2487,7 +2517,11 @@ class CziImage:
         )
 
     def chunks(
-        self, *, squeeze: bool = True, **sizes: int | None
+        self,
+        *,
+        squeeze: bool = True,
+        maxcache: int | None = None,
+        **sizes: int | None,
     ) -> CziImageChunks:
         """Return image chunks as CziImage views.
 
@@ -2501,6 +2535,20 @@ class CziImage:
                 When ``False``, size-1 axes such as the single T or Z index
                 per chunk are retained in :py:attr:`~CziImage.dims` and
                 :py:attr:`~CziImage.shape`.
+            maxcache:
+                Number of decoded subblock arrays to cache during iteration.
+                Only active when :py:attr:`CziFile.maxcache` is ``None``
+                (auto mode, the default).
+                ``None`` (default) auto-detects: computes how many
+                subblocks can overlap one grid tile
+                (``(floor((tile_x-2)/sub_w)+2) * (floor((tile_y-2)/sub_h)+2)
+                * layers``), where ``layers`` is the product of any
+                non-spatial dimensions specified in ``sizes``, using
+                their batch size or full axis size for ``None``;
+                capped at the subblock count and 64;
+                0 when no spatial tiling is requested.
+                Pass 0 to disable caching, or an explicit positive integer
+                to set the temporary FIFO cache size for this iteration.
             **sizes:
                 Chunk size specification as keyword arguments.
                 Keys are dimension names, values control behavior:
@@ -2542,7 +2590,7 @@ class CziImage:
         faster as it composites all tiles in a single parallel pass.
 
         """
-        return CziImageChunks(self, sizes, squeeze=squeeze)
+        return CziImageChunks(self, sizes, squeeze=squeeze, maxcache=maxcache)
 
     @cached_property
     def _storedsize_scale(self) -> tuple[float, ...]:
@@ -2908,12 +2956,29 @@ class CziImageChunks:
               For spatial dimensions, this produces a tiling grid.
         squeeze:
             Whether to drop size-1 dimensions from each chunk.
+        maxcache:
+            Maximum number of decoded subblock arrays to cache during
+            iteration.
+            ``None`` (default) auto-detects: computes how many subblocks
+            can overlap one grid tile
+            (``(floor((tile_x-2)/sub_w)+2) * (floor((tile_y-2)/sub_h)+2)
+            * layers``), where ``layers`` is the product of any
+            non-spatial dimensions specified in ``sizes``, using their
+            batch size or full axis size for ``None``;
+            capped at the subblock count and 64; 0 when no spatial tiling.
+            ``0`` disables caching.
+            Positive integer sets an explicit limit.
+            Only active when :py:attr:`CziFile.maxcache` is ``None``
+            (auto mode, the default).
+            The cache is set on the parent :py:class:`CziFile` for the
+            duration of iteration and restored on exit.
 
     """
 
     _image: CziImage
     _sizes: dict[str, int | None]
     _squeeze: bool
+    _maxcache: int  # 0 = disabled, >0 = cache size
 
     def __init__(
         self,
@@ -2922,6 +2987,7 @@ class CziImageChunks:
         /,
         *,
         squeeze: bool = True,
+        maxcache: int | None = None,
     ) -> None:
         self._image = image
         self._squeeze = squeeze
@@ -2945,6 +3011,45 @@ class CziImageChunks:
                 msg = f'chunk size for {dim!r} must be positive, got {val}'
                 raise ValueError(msg)
         self._sizes = dict(sizes)
+        # resolve maxcache: auto computes how many subblocks can overlap one
+        # grid tile. a tile of width w can straddle at most
+        # floor((w-2)/sub_w)+2 subblock columns (and same for rows).
+        # multiply by layers: when non-spatial dims (C, Z, ...) are batched
+        # or kept whole in the chunk, each spatial position contributes
+        # multiple entries and the cache must hold all of them to avoid
+        # re-decoding boundary subblocks for consecutive tiles
+        if maxcache is None:
+            tile_x = sizes.get('X')
+            tile_y = sizes.get('Y')
+            if tile_x is not None or tile_y is not None:
+                layout = image._subblock_layout
+                xi, yi = layout.x_idx, layout.y_idx
+                entries = image._entries
+                if entries:
+                    e0 = entries[0]
+                    sub_w = e0.shape[xi] if xi >= 0 else 1
+                    sub_h = e0.shape[yi] if yi >= 0 else 1
+                    nx = (tile_x - 2) // sub_w + 2 if tile_x else 1
+                    ny = (tile_y - 2) // sub_h + 2 if tile_y else 1
+                    spatial_set = {'Y', 'X', 'S'}
+                    layers = 1
+                    for dim, sz in sizes.items():
+                        if dim in spatial_set:
+                            continue
+                        dim_size = raw.get(dim, 1)
+                        layers *= (
+                            dim_size if sz is None else min(int(sz), dim_size)
+                        )
+                    self._maxcache = min(nx * ny * layers, len(entries), 64)
+                else:
+                    self._maxcache = 0
+            else:
+                self._maxcache = 0
+        elif maxcache < 0:
+            msg = f'maxcache must be >= 0, got {maxcache}'
+            raise ValueError(msg)
+        else:
+            self._maxcache = maxcache
 
     def __len__(self) -> int:
         """Number of chunks."""
@@ -2995,119 +3100,126 @@ class CziImageChunks:
 
         no_entries: tuple[CziDirectoryEntryDV, ...] = ()
 
-        for combo in combos:
-            # filter entries by iterated dimension coordinates
-            selection: dict[str, SelectionValue] = dict(parent_selection)
-            entries: tuple[CziDirectoryEntryDV, ...] = entries_all
+        with parent._cache.scoped_resize(
+            self._maxcache if parent._auto_cache else 0
+        ):
+            for combo in combos:
+                # filter entries by iterated dimension coordinates
+                selection: dict[str, SelectionValue] = dict(parent_selection)
+                entries: tuple[CziDirectoryEntryDV, ...] = entries_all
 
-            if entries_by_combo is not None:
-                # O(1) lookup replacing sequential O(N) scans
-                entries = entries_by_combo.get(combo, no_entries)
-                selection.update(zip(iter_dims, combo, strict=True))
-            else:
-                for dim, val in zip(iter_dims, combo, strict=True):
-                    if isinstance(val, int):
-                        entries = tuple(
-                            e
-                            for e in entries
-                            if dim in e.dims
-                            and e.start[e.dims.index(dim)] == val
-                        )
-                        selection[dim] = val
-                    elif isinstance(val, slice):
-                        r = range(val.start, val.stop)
-                        entries = tuple(
-                            e
-                            for e in entries
-                            if dim in e.dims
-                            and e.start[e.dims.index(dim)] in r
-                        )
-                        selection[dim] = val
+                if entries_by_combo is not None:
+                    # O(1) lookup replacing sequential O(N) scans
+                    entries = entries_by_combo.get(combo, no_entries)
+                    selection.update(zip(iter_dims, combo, strict=True))
+                else:
+                    for dim, val in zip(iter_dims, combo, strict=True):
+                        if isinstance(val, int):
+                            entries = tuple(
+                                e
+                                for e in entries
+                                if dim in e.dims
+                                and e.start[e.dims.index(dim)] == val
+                            )
+                            selection[dim] = val
+                        elif isinstance(val, slice):
+                            r = range(val.start, val.stop)
+                            entries = tuple(
+                                e
+                                for e in entries
+                                if dim in e.dims
+                                and e.start[e.dims.index(dim)] in r
+                            )
+                            selection[dim] = val
 
-            # add None for dims kept in chunk
-            for dim, sz in sizes.items():
-                if sz is None and dim not in ('Y', 'X', 'S'):
-                    selection[dim] = None
+                # add None for dims kept in chunk
+                for dim, sz in sizes.items():
+                    if sz is None and dim not in ('Y', 'X', 'S'):
+                        selection[dim] = None
 
-            if not entries:
-                continue
+                if not entries:
+                    continue
 
-            # reorder selection keys to match parent dim order so that
-            # the chunk's _dim_order follows the parent's dimension order
-            selection = dict(
-                sorted(
-                    selection.items(),
-                    key=lambda kv: parent_rank.get(kv[0], len(parent_rank)),
+                # reorder selection keys to match parent dim order so that
+                # the chunk's _dim_order follows the parent's dimension order
+                selection = dict(
+                    sorted(
+                        selection.items(),
+                        key=lambda kv: parent_rank.get(
+                            kv[0], len(parent_rank)
+                        ),
+                    )
                 )
-            )
 
-            # build name parts from iteration coordinates
-            parts: list[str] = []
-            if image._name:
-                parts.append(image._name)
-            sel_parts = [
-                f'{d}={v!r}' for d, v in zip(iter_dims, combo, strict=True)
-            ]
-            if sel_parts:
-                parts.append(', '.join(sel_parts))
+                # build name parts from iteration coordinates
+                parts: list[str] = []
+                if image._name:
+                    parts.append(image._name)
+                sel_parts = [
+                    f'{d}={v!r}' for d, v in zip(iter_dims, combo, strict=True)
+                ]
+                if sel_parts:
+                    parts.append(', '.join(sel_parts))
 
-            if grid is not None:
-                # Use the image's cached spatial index when entries are
-                # unfiltered (i.e. no non-spatial dim selection was applied),
-                # avoiding an O(N) linear scan per grid tile.
-                use_spi = (entries is entries_all) and xi >= 0
-                for roi in grid:
-                    rx, ry, rw, rh = roi
-                    if use_spi:
-                        roi_entries: tuple[CziDirectoryEntryDV, ...] = tuple(
-                            image._spatial_index_filter(rx, ry, rw, rh)
-                        )
-                    else:
-                        roi_entries = tuple(
-                            e
-                            for e in entries
-                            if (
-                                xi < 0
-                                or not (
-                                    e.start[xi] + e.shape[xi] <= rx
-                                    or e.start[xi] >= rx + rw
+                if grid is not None:
+                    # Use the image's cached spatial index when entries are
+                    # unfiltered (i.e. no non-spatial dim selection was
+                    # applied), avoiding an O(N) linear scan per grid tile.
+                    use_spi = (entries is entries_all) and xi >= 0
+                    for roi in grid:
+                        rx, ry, rw, rh = roi
+                        if use_spi:
+                            roi_entries: tuple[CziDirectoryEntryDV, ...] = (
+                                tuple(
+                                    image._spatial_index_filter(rx, ry, rw, rh)
                                 )
                             )
-                            and (
-                                yi < 0
-                                or not (
-                                    e.start[yi] + e.shape[yi] <= ry
-                                    or e.start[yi] >= ry + rh
+                        else:
+                            roi_entries = tuple(
+                                e
+                                for e in entries
+                                if (
+                                    xi < 0
+                                    or not (
+                                        e.start[xi] + e.shape[xi] <= rx
+                                        or e.start[xi] >= rx + rw
+                                    )
+                                )
+                                and (
+                                    yi < 0
+                                    or not (
+                                        e.start[yi] + e.shape[yi] <= ry
+                                        or e.start[yi] >= ry + rh
+                                    )
                                 )
                             )
+                        if not roi_entries:
+                            continue
+                        roi_parts = list(parts)
+                        roi_parts.append(f'roi={roi!r}')
+                        name = ' '.join(roi_parts)
+                        yield CziImage(
+                            parent,
+                            roi_entries,
+                            name=name,
+                            squeeze=squeeze,
+                            roi=roi,
+                            pixeltype=pixeltype,
+                            storedsize=storedsize,
+                            selection=selection or None,
                         )
-                    if not roi_entries:
-                        continue
-                    roi_parts = list(parts)
-                    roi_parts.append(f'roi={roi!r}')
-                    name = ' '.join(roi_parts)
+                else:
+                    name = ' '.join(parts) if parts else ''
                     yield CziImage(
                         parent,
-                        roi_entries,
+                        entries,
                         name=name,
                         squeeze=squeeze,
-                        roi=roi,
+                        roi=image._roi,
                         pixeltype=pixeltype,
                         storedsize=storedsize,
                         selection=selection or None,
                     )
-            else:
-                name = ' '.join(parts) if parts else ''
-                yield CziImage(
-                    parent,
-                    entries,
-                    name=name,
-                    squeeze=squeeze,
-                    roi=image._roi,
-                    pixeltype=pixeltype,
-                    storedsize=storedsize,
-                    selection=selection or None,
-                )
 
     @cached_property
     def _chunk_axes(
@@ -3865,7 +3977,12 @@ class CziSubBlockSegmentData(CziSegmentData):
         total = product(shape)
         size = total * dtype.itemsize
         compression = de.compression
-        decode = compression.decode
+        decode = de.decode
+        decode_cache = czi._cache
+        if decode is not None:
+            cached = decode_cache.get(self.data_offset)
+            if cached is not None:
+                return cached
         if decode is not None:
             with lock:
                 fh.seek(self.data_offset)
@@ -3960,6 +4077,8 @@ class CziSubBlockSegmentData(CziSegmentData):
                 image = image[..., [2, 1, 0, 3]].copy()
                 image[..., 3] = 255
 
+        if decode is not None:
+            decode_cache.put(self.data_offset, image)
         return image
 
     def attachments(self) -> tuple[tuple[bytes, bytes], ...]:
@@ -4055,12 +4174,12 @@ class CziDirectoryEntryDV:
         'shape',
         'start',
         'stop',
-        'start_coordinate',
         'stored_shape',
         'mosaic_index',
         'scene_index',
         'is_pyramid',
-        '_fh',
+        'decode',
+        '_start_coordinate_raw',
     )
 
     offset: int
@@ -4096,9 +4215,6 @@ class CziDirectoryEntryDV:
     stop: tuple[int, ...]
     """Upper indices of dimensions, excluding mosaic and scene."""
 
-    start_coordinate: tuple[float, ...]
-    """Physical start coordinate of dimension, excluding mosaic and scene."""
-
     stored_shape: tuple[int, ...]
     """Stored size of dimensions, excluding mosaic and scene."""
 
@@ -4111,7 +4227,10 @@ class CziDirectoryEntryDV:
     is_pyramid: bool
     """Pixel data is sub- or supersampled along some dimensions."""
 
-    _fh: IO[bytes]
+    decode: Callable[..., Any] | None
+    """Decoder function for pixel data, or None if uncompressed."""
+
+    _start_coordinate_raw: bytes
 
     def __init__(self, fh: IO[bytes], /) -> None:
         self.offset = fh.tell()
@@ -4136,6 +4255,7 @@ class CziDirectoryEntryDV:
         self.pixel_type = CziPixelType(pixel_type)
         self.compression = CziCompressionType(compression)
         self.pyramid_type = CziPyramidType(pyramid_type)
+        self.decode = CziCompressionType.decoder(compression)
         self.scene_index = -1
         self.mosaic_index = -1
 
@@ -4180,7 +4300,9 @@ class CziDirectoryEntryDV:
         self.shape = tuple(shape)
         self.start = tuple(start)
         self.stop = tuple(stop)
-        self.start_coordinate = tuple(start_coordinate)
+        self._start_coordinate_raw = struct.pack(
+            f'<{len(start_coordinate)}f', *start_coordinate
+        )
         self.stored_shape = tuple(stored_shape)
         self.is_pyramid = self.shape != self.stored_shape
 
@@ -4202,6 +4324,16 @@ class CziDirectoryEntryDV:
             raise CziFileError(msg)
         fh.seek(dimensions_count * 20, 1)
         return int(file_position)
+
+    @property
+    def start_coordinate(self) -> tuple[float, ...]:
+        """Physical start coordinate of dimension, excluding mosaic and scene.
+
+        Values preserve the original float32 precision from the file.
+
+        """
+        n = len(self._start_coordinate_raw) // 4
+        return struct.unpack(f'<{n}f', self._start_coordinate_raw)
 
     @property
     def schema_type(self) -> str:
@@ -5374,24 +5506,10 @@ class CziCompressionType(enum.IntEnum):
     SYSTEMRAW = 1000  # 1000-
     """System specific RAW data."""
 
-    decode: Callable[..., Any] | None
-    """Return decoded pixel data."""
-
     def __new__(cls, value: int, /) -> Self:
-        """Create enum member and bind appropriate pixel-data decoder."""
+        """Create enum member."""
         obj = int.__new__(cls, value)
         obj._value_ = value
-        obj.decode = None
-        if value == 1:
-            obj.decode = imagecodecs.jpeg8_decode
-        elif value == 2:
-            obj.decode = imagecodecs.lzw_decode
-        elif value == 4:
-            obj.decode = imagecodecs.jpegxr_decode
-        elif value == 5:
-            obj.decode = imagecodecs.zstd_decode
-        elif value == 6:
-            obj.decode = imagecodecs.zstd_decode  # needs special handling
         return obj
 
     @classmethod
@@ -5409,11 +5527,44 @@ class CziCompressionType(enum.IntEnum):
         obj = int.__new__(cls, int(base))
         obj._value_ = value
         obj._name_ = base._name_
-        obj.decode = base.decode
         return obj
 
     def __str__(self) -> str:
         return f'{self.name} ({self._value_})'
+
+    @staticmethod
+    @cache
+    def decoder(value: int, /) -> Callable[..., Any] | None:
+        """Return decoder function for compression type value.
+
+        Resolved lazily on first call per value and cached.
+        For JPEG XR (value 4), prefers WIC on Windows when available and
+        falls back to :py:func:`imagecodecs.jpegxr_decode` otherwise.
+
+        Parameters:
+            value:
+                Integer compression type value.
+
+        Returns:
+            Decoder callable, or ``None`` if no decoder is needed.
+
+        """
+        result: Callable[..., Any] | None
+        match value:
+            case 1:  # | 3
+                result = imagecodecs.jpeg8_decode
+            case 2:
+                result = imagecodecs.lzw_decode
+            case 4:
+                if hasattr(imagecodecs, 'WIC') and imagecodecs.WIC.available:
+                    result = imagecodecs.wic_decode
+                else:
+                    result = imagecodecs.jpegxr_decode
+            case 5 | 6:
+                result = imagecodecs.zstd_decode
+            case _:
+                result = None
+        return result
 
 
 class CziPyramidType(enum.IntEnum):
@@ -5790,6 +5941,110 @@ def match_filename(filename: str, /) -> tuple[str, int]:
     name = match[0] + '.czi'
     part = int(match[1]) if match[1] is not None else 0
     return name, part
+
+
+class DecodeCache:
+    """FIFO subblock decode cache keyed by file offset.
+
+    Caching is applied only to compressed subblocks.
+    Disabled by default (maxsize=0).
+
+    """
+
+    __slots__ = ('_data', '_lock', '_maxsize')
+
+    _data: dict[int, NDArray[Any]] | None
+    _lock: threading.Lock | NullLock
+    _maxsize: int
+
+    def __init__(
+        self,
+        maxsize: int = 0,
+        lock: threading.Lock | NullLock | None = None,
+    ) -> None:
+        if lock is None:
+            # use a real lock only when the GIL is disabled
+            # (free-threaded Python 3.13+)
+            if hasattr(sys, '_is_gil_enabled') and not sys._is_gil_enabled():
+                lock = threading.Lock()
+            else:
+                lock = NullLock()
+        self._lock = lock
+        self._data = {} if maxsize > 0 else None
+        self._maxsize = max(0, maxsize)
+
+    def get(self, key: int, /) -> NDArray[Any] | None:
+        """Return cached array for key, or None if absent or disabled."""
+        data = self._data
+        if data is None:
+            return None
+        return data.get(key)
+
+    def put(self, key: int, value: NDArray[Any], /) -> None:
+        """Store value under key, evicting oldest entry if at capacity."""
+        data = self._data
+        if data is None:
+            return
+        with self._lock:
+            if len(data) >= self._maxsize:
+                data.pop(next(iter(data)))
+            data[key] = value
+
+    @property
+    def maxsize(self) -> int:
+        """Maximum number of cache entries, or 0 if disabled."""
+        return self._maxsize
+
+    def resize(self, maxsize: int, /) -> None:
+        """Enable, resize, or disable the cache.
+
+        Parameters:
+            maxsize:
+                Maximum number of entries. 0 disables and clears cache.
+
+        Raises:
+            ValueError: maxsize is negative.
+
+        """
+        if maxsize < 0:
+            msg = f'maxsize must be >= 0, got {maxsize}'
+            raise ValueError(msg)
+        if maxsize == 0:
+            self._data = None
+            self._maxsize = 0
+        else:
+            if self._data is None:
+                self._data = {}
+            elif len(self._data) > maxsize:
+                with self._lock:
+                    while len(self._data) > maxsize:
+                        self._data.pop(next(iter(self._data)))
+            self._maxsize = maxsize
+
+    @contextlib.contextmanager
+    def scoped_resize(self, maxsize: int, /) -> Iterator[None]:
+        """Context manager that temporarily changes the cache size.
+
+        Restores previous size and cached entries on exit, including
+        when a generator using this context is closed.
+        When maxsize is 0, the cache is left unchanged.
+
+        Parameters:
+            maxsize:
+                Temporary cache size. 0 to leave unchanged.
+
+        """
+        if maxsize == 0:
+            yield
+            return
+        prev_data = self._data
+        prev_maxsize = self._maxsize
+        self.resize(maxsize)
+        try:
+            yield
+        finally:
+            self._data = prev_data
+            self._maxsize = prev_maxsize
 
 
 class NullLock:
