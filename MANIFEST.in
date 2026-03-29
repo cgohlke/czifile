@@ -8,12 +8,13 @@ include czifile/py.typed
 exclude benchmark_czifile_vs_pylibczirw.py
 
 exclude .env
+exclude .gitignore
 exclude *.cmd
 exclude *.yaml
+exclude *.code-workspace
 exclude mypy.ini
 exclude ruff.toml
-exclude *.code-workspace
-exclude .gitignore
+exclude typos.toml
 recursive-exclude .vscode *
 recursive-exclude doc *
 recursive-exclude docs *
