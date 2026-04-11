@@ -1,5 +1,7 @@
 # czifile/tests/conftest.py
 
+"""Pytest configuration."""
+
 import os
 import sys
 
@@ -19,28 +21,31 @@ def pytest_configure(config):
 
 
 def pytest_report_header(config):
+    """Return pytest report header."""
     try:
         from fsspec import __version__ as fsspec
         from numpy import __version__ as numpy
         from test_czifile import config
         from tifffile import __version__ as tifffile
 
-        from czifile import __version__ as czifile
+        import czifile
 
         try:
             from imagecodecs import __version__ as imagecodecs
         except ImportError:
             imagecodecs = 'N/A'
         return (
-            f'versions: czifile-{czifile}, '
+            f'Python {sys.version.splitlines()[0]}\n'
+            f'packagedir: {czifile.__path__[0]}\n'
+            f'versions: czifile-{czifile.__version__}, '
             f'tifffile-{tifffile}, '
             f'imagecodecs-{imagecodecs}, '
             f'numpy-{numpy}, '
             f'fsspec-{fsspec}\n'
             f'test config: {config()}'
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        return f'pytest_report_header failed: {exc!s}'
 
 
 collect_ignore = ['_tmp', 'data']
