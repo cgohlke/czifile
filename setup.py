@@ -43,7 +43,7 @@ version = search(r"__version__ = '(.*?)'", code).replace('.x.x', '.dev0')
 description = search(r'"""(.*)\.(?:\r\n|\r|\n)', code)
 
 readme = search(
-    r'(?:\r\n|\r|\n){2}"""(.*)"""(?:\r\n|\r|\n){2}from __future__',
+    r'(?:\r\n|\r|\n){2}r"""(.*)"""(?:\r\n|\r|\n){2}from __future__',
     code,
     re.MULTILINE | re.DOTALL,
 )
@@ -58,7 +58,7 @@ if 'sdist' in sys.argv:
         fh.write(fix_docstring_examples(readme))
 
     license = search(
-        r'(# Copyright.*?(?:\r\n|\r|\n))(?:\r\n|\r|\n)+""',
+        r'(# Copyright.*?(?:\r\n|\r|\n))(?:\r\n|\r|\n)+r""',
         code,
         re.MULTILINE | re.DOTALL,
     )
