@@ -1,6 +1,10 @@
 Revisions
 =========
 
+2026.4.11
+
+- Fall back to parsing numeric channel names as float coords['C'].
+
 2026.3.17
 
 - Add cache for decoded subblock arrays.
