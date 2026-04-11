@@ -29,7 +29,7 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-"""Read Carl Zeiss image files (CZI).
+r"""Read Carl Zeiss image files (CZI).
 
 Czifile is a Python library for reading image data and metadata from
 Carl Zeiss Image (CZI) files, the native file format of ZEN by
@@ -47,7 +47,7 @@ file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.3.17
+:Version: 2026.4.11
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -69,8 +69,8 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.12, 3.14.3 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.3
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.4 64-bit
+- `NumPy <https://pypi.org/project/numpy>`_ 2.4.4
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.3.6
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
@@ -78,6 +78,10 @@ This revision was tested with the following requirements and dependencies
 
 Revisions
 ---------
+
+2026.4.11
+
+- Fall back to parsing numeric channel names as float coords['C'].
 
 2026.3.17
 
@@ -143,21 +147,30 @@ Notes
 
 The API is not stable yet and might change between revisions.
 
-Python 32-bit versions are deprecated. Python < 3.12 are no longer supported.
+`Carl Zeiss AG <https://www.zeiss.com/>`_ is a manufacturer of microscopes
+and scientific instruments.
+CZI is a proprietary file format written by Zeiss acquisition software
+such as ZEN to store microscopy images and metadata.
 
-"ZEISS" and "Carl Zeiss" are registered trademarks of Carl Zeiss AG.
+CZI files are based on the ZISRAW (Zeiss Image Segment Raw) container
+specification, which is confidential and does not permit writing CZI files:
 
-The ZISRAW file format design specification [1]_ is confidential and the
-license agreement does not permit to write data into CZI files.
+    | ZISRAW (CZI) File Format Design Specification Release Version 1.2.2.
+    | "CZI 07-2016/CZI-DOC ZEN 2.3/DS_ZISRAW-FileFormat.pdf"
+
+The ZISRAW format organizes data into typed, length-prefixed segments:
+a file header, image subblocks, XML metadata, and attachments. Each image
+subblock carries pixels for one tile or Z-plane across up to ten logical
+dimensions (X, Y, Z, channel, time, scene, phase, illumination, rotation, and
+mosaic index). Pixel data may be stored uncompressed or compressed with JPEG,
+JPEG XR, or Zstd.
 
 Only a subset of the 2016 specification is implemented. Specifically,
 multi-file images and topography images are not supported.
 Some features are untested due to lack of sample files.
 
-Tested on Windows with a few example files only.
-
 Czifile relies on the `imagecodecs <https://pypi.org/project/imagecodecs/>`__
-package for decoding LZW, ZStandard, JPEG, and JPEG XR compressed images.
+package for decoding LZW, Zstd, JPEG, and JPEG XR compressed images.
 
 Other libraries for reading CZI files (all GPL or LGPL licensed):
 `libczi <https://github.com/ZEISS/libczi>`__,
@@ -166,12 +179,6 @@ Other libraries for reading CZI files (all GPL or LGPL licensed):
 `bio-formats <https://github.com/ome/bioformats>`_,
 `libCZI <https://github.com/zeiss-microscopy/libCZI>`__ (deprecated), and
 `pylibczi <https://github.com/elhuhdron/pylibczi>`__ (deprecated).
-
-References
-----------
-
-.. [1] ZISRAW (CZI) File Format Design Specification Release Version 1.2.2.
-       "CZI 07-2016/CZI-DOC ZEN 2.3/DS_ZISRAW-FileFormat.pdf" (confidential).
 
 Examples
 --------
@@ -369,7 +376,7 @@ View the images and metadata in a CZI file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.3.17'
+__version__ = '2026.4.11'
 
 __all__ = [
     'CONVERT_PIXELTYPE',
@@ -443,9 +450,8 @@ if TYPE_CHECKING:
     from numpy.typing import ArrayLike, DTypeLike, NDArray
     from xarray import DataArray
 
-    OutputType = str | IO[bytes] | NDArray[Any] | None
-
-    SelectionValue = int | slice | Sequence[int] | None
+type OutputType = str | IO[bytes] | NDArray[Any] | None
+type SelectionValue = int | slice | Sequence[int] | None
 
 
 FIRST_SCENE: int = -1010101  # sentinel: select first available scene
@@ -1815,8 +1821,10 @@ class CziImage:
         :py:attr:`channels` when that field is present for every channel in
         the slice and the ranges are mutually non-overlapping (narrow
         spectral bins, for example LSM980 spectral imaging). When the ranges
-        overlap, channel names are used instead, falling back to integer
-        indices if names are absent.
+        overlap, channel names are used instead. When `DetectionWavelength`
+        is absent, channel names are used; if all names parse as floats
+        (for example, wavelengths encoded as names like ``'480'``), a float
+        array is returned. Falls back to integer indices if names are absent.
 
         """
         result: dict[str, NDArray[Any]] = {}
@@ -1930,7 +1938,14 @@ class CziImage:
                 else:
                     names_slice = [name for name, _ in ch_slice]
                     if len(names_slice) == size_val and all(names_slice):
-                        result[dim] = numpy.array(names_slice)
+                        # if all names parse as floats (e.g. wavelengths
+                        # encoded as names), prefer numeric coordinates
+                        try:
+                            result[dim] = numpy.array(
+                                [float(n) for n in names_slice]
+                            )
+                        except ValueError:
+                            result[dim] = numpy.array(names_slice)
                     else:
                         result[dim] = numpy.arange(
                             start_val, start_val + size_val
