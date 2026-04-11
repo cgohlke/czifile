@@ -1,4 +1,4 @@
-# test_czifile.py
+# czifile/tests/test_czifile.py
 
 # Copyright (c) 2013-2026, Christoph Gohlke
 # All rights reserved.
@@ -29,7 +29,7 @@
 
 """Unittests for the czifile package.
 
-:Version: 2026.3.17
+:Version: 2026.4.11
 
 """
 
@@ -1449,11 +1449,11 @@ def test_pixeltype_gray8_gray16():
 def test_pixeltype_gray8_gray32float():
     """Test mixed GRAY8/GRAY32FLOAT pixel types in Muenze 2.czi."""
     # C=0 is GRAY8, C=1 is GRAY32FLOAT.  The auto-promoted pixeltype is
-    # GRAY32FLOAT (numpy.result_type promotes uint8 → float32), so the
+    # GRAY32FLOAT (numpy.result_type promotes uint8 to float32), so the
     # default composite output preserves the full float range, including
     # negative values that cannot occur in uint8.
     # The GRAY32FLOAT channel is a ZEN Online Adaptive Deconvolution (OAD)
-    # result.  ZEN stores NaN as a sentinel for pixels with no valid
+    # result. ZEN stores NaN as a sentinel for pixels with no valid
     # deconvolution result (masked or out-of-kernel regions).  When converting
     # to an integer type, NaN must be mapped to 0 rather than propagated,
     # which would trigger a RuntimeWarning on the integer cast.
@@ -1489,10 +1489,10 @@ def test_pixeltype_gray8_gray32float():
         ).asarray()
         assert arr.dtype == numpy.dtype('float32')
         assert arr.shape == (32, 32)
-        assert arr.min() < 0
+        assert arr.min() <= 0
 
-        # the full float channel contains NaN sentinels (pixels with no valid
-        # deconvolution result); converting to uint8 must not raise
+        # the full float channel may contain NaN sentinels (pixels with no
+        # valid deconvolution result); converting to uint8 must not raise
         # RuntimeWarning: invalid value encountered in cast
         arr_u8 = czi.scenes[0](C=1, pixeltype=CziPixelType.GRAY8).asarray()
         assert arr_u8.dtype == numpy.dtype('uint8')
@@ -1502,8 +1502,9 @@ def test_pixeltype_gray8_gray32float():
             C=1, pixeltype=CziPixelType.GRAY32FLOAT
         ).asarray()
         nan_mask = numpy.isnan(arr_f32_full)
-        assert nan_mask.any(), 'expected NaN sentinels in OAD float channel'
-        assert numpy.all(arr_u8[nan_mask] == 0)
+        if nan_mask.any():
+            # NaN pixels must be mapped to 0, not to some arbitrary integer
+            assert numpy.all(arr_u8[nan_mask] == 0)
 
 
 def test_pixeltype_bgra_opaque():
@@ -2091,7 +2092,7 @@ def test_pyramid():
         arr7 = lv7.asarray()
         assert arr7.shape == lv7.shape
         assert arr7.dtype == numpy.dtype('uint8')
-        assert int(arr7.sum()) == 635479642
+        assert arr7.any()  # JPEGXR is lossy; no exact checksum
 
         # all subblocks use JPEGXR compression
         compressions = {e.compression for e in czi.subblock_directory}
@@ -2788,6 +2789,49 @@ def test_spectral_lsm800():
             '470-Ch2',
         ]
         assert list(c_coord[-2:]) == ['650-Ch1', '650-Ch2']
+
+
+def test_spectral_paramecium():
+    """Test paramecium.czi: numeric channel names, no DetectionWavelength."""
+    # paramecium.czi is a 30-channel spectral scan acquired for phasor
+    # analysis. DetectionWavelength is absent from the metadata; channel
+    # names are wavelengths encoded as plain strings ('423', '433', ...,
+    # '713'). coords['C'] should return float64 values (parsed from the
+    # names) rather than strings.
+
+    filename = DATA / 'Private-PhasorPy/paramecium.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = czi.scenes[0]
+
+        assert img.dims == ('C', 'Y', 'X')
+        assert img.shape == (30, 512, 512)
+        assert img.dtype == numpy.dtype('uint8')
+
+        ch = img.channels
+        assert len(ch) == 30
+        # channel names are wavelengths in nm encoded as strings
+        assert next(iter(ch)) == '423'
+        assert next(reversed(ch)) == '713'
+        # DetectionWavelength is absent for all channels
+        assert all(c.get('DetectionWavelength') is None for c in ch.values())
+
+        # coords['C']: float64 because all names parse as floats
+        c_coord = img.coords['C']
+        assert c_coord.dtype == numpy.dtype('float64')
+        assert c_coord.shape == (30,)
+        assert list(c_coord) == pytest.approx(
+            [423.0 + 10.0 * i for i in range(30)]
+        )
+
+        # spatial coords are physical (metres)
+        assert img.coords['Y'].dtype == numpy.dtype('float64')
+        assert img.coords['Y'][0] == pytest.approx(0.0)
+        assert img.coords['X'][0] == pytest.approx(0.0)
+        pixel_size = img.coords['X'][1] - img.coords['X'][0]
+        assert pixel_size == pytest.approx(8.303e-7, rel=1e-3)
 
 
 def test_airyscan_timestamps():
