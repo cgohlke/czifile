@@ -101,12 +101,10 @@ setup(
     package_data={'czifile': ['py.typed']},
     python_requires='>=3.12',
     install_requires=[
-        'numpy>=2.0',
+        'numpy>=2.1',
         'imagecodecs>=2026.3.6',
     ],
-    extras_require={
-        'all': ['xarray', 'tifffile', 'matplotlib'],
-    },
+    extras_require={'all': ['xarray', 'tifffile', 'matplotlib']},
     entry_points={
         'console_scripts': [
             'czifile = czifile.czifile:main',
