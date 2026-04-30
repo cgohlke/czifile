@@ -29,7 +29,7 @@
 
 """Unittests for the czifile package.
 
-:Version: 2026.4.11
+:Version: 2026.4.30
 
 """
 
@@ -884,11 +884,19 @@ def test_czi():
         # bbox: (x, y, width, height) in global CZI coordinates
         assert img.bbox == (0, 0, 312, 181)
 
-        # coords and attrs
+        # coords, coord_units, coord_offsets, coord_scales, and attrs
         assert isinstance(img.coords, Mapping)
+        assert isinstance(img.coord_units, dict)
+        assert isinstance(img.coord_offsets, dict)
+        assert isinstance(img.coord_scales, dict)
         assert isinstance(img.attrs, Mapping)
         assert img.name == 'Scene 0'
         assert img.attrs['filepath'] == os.path.normpath(filename)
+        assert img.coord_offsets == {'X': 0.0, 'Y': 0.0, 'Z': 0.0}
+        assert img.coord_scales == pytest.approx(
+            {'X': 1.06156e-07, 'Y': 1.06156e-07, 'Z': 3e-07}
+        )
+        assert img.coord_units == {'X': 'meter', 'Y': 'meter', 'Z': 'meter'}
 
         # CziImageChunks interface
         chunks = img.chunks()
@@ -1175,6 +1183,143 @@ def test_timestamps():
     )
 
 
+def test_coords_t_datetime64():
+    """Test datetime property and float coords T when acq time exists."""
+    # CZI_Timelapse_ZEN_Blue.czi: T=5, interval=1s, has AcquisitionDateAndTime
+    filename = DATA / 'CZI_Timelapse_ZEN_Blue.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = next(iter(czi.scenes.values()))
+        assert img.dims == ('T', 'Y', 'X')
+        assert img.sizes['T'] == 5
+
+        # datetime property returns parsed AcquisitionDateAndTime
+        assert img.datetime == numpy.datetime64(
+            '2013-11-26T14:54:57.384580300', 'ns'
+        )
+
+        # coords['T'] is float seconds, not datetime64
+        t = img.coords['T']
+        assert t.dtype == numpy.float64
+        assert len(t) == 5
+        numpy.testing.assert_allclose(t, numpy.arange(5, dtype='float64'))
+
+        # coord_offsets/scales/units report seconds
+        assert img.coord_offsets['T'] == pytest.approx(0.0)
+        assert img.coord_scales['T'] == pytest.approx(1.0)
+        assert img.coord_units['T'] == 'second'
+
+
+def test_coords_t_seconds():
+    """Test coords['T'] as float seconds when no acquisition time exists."""
+    # Mouse_kidney_VivaTome-1chTZ.czi: T=10, interval=1s, no acq time
+    filename = (
+        DATA / 'CZI-samples' / 'VivaTome' / 'Mouse_kidney_VivaTome-1chTZ.czi'
+    )
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = next(iter(czi.scenes.values()))
+        assert 'T' in img.dims
+        assert img.sizes['T'] == 10
+
+        coords = img.coords
+        t = coords['T']
+        assert t.dtype == numpy.float64
+        assert len(t) == 10
+
+        # values are 0, 1, 2, ... seconds (start_val * interval)
+        numpy.testing.assert_allclose(t, numpy.arange(10, dtype='float64'))
+
+        # coord_offsets/scales/units report seconds
+        assert img.coord_offsets['T'] == pytest.approx(0.0)
+        assert img.coord_scales['T'] == pytest.approx(1.0)
+        assert img.coord_units['T'] == 'second'
+
+
+def test_coords_t_timestamps():
+    """Test coords['T'] from timestamps attachment when no interval."""
+    # T=3_CH=2.czi: T=3, interval=0, has timestamps attachment
+    filename = DATA / 'Zenodo-7015307' / 'T=3_CH=2.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = next(iter(czi.scenes.values()))
+        assert 'T' in img.dims
+        assert img.sizes['T'] == 3
+
+        coords = img.coords
+        t = coords['T']
+        assert t.dtype == numpy.float64
+        assert len(t) == 3
+
+        # values from timestamps attachment
+        assert t[0] == pytest.approx(0.2337348, abs=1e-5)
+        assert t[2] == pytest.approx(0.9115668, abs=1e-5)
+
+        # T not in coord_offsets/scales/units (no interval metadata)
+        assert 'T' not in img.coord_offsets
+        assert 'T' not in img.coord_scales
+        assert 'T' not in img.coord_units
+
+
+def test_coords_t_absent():
+    """Test T absent from coords when no interval and no timestamps."""
+    # 2chZT.czi: T=19, no interval, no timestamps
+    filename = DATA / '2chZT.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = next(iter(czi.scenes.values()))
+        assert 'T' in img.dims
+        assert img.sizes['T'] == 19
+
+        # no T metadata at all
+        assert 'T' not in img.coords
+        assert 'T' not in img.coord_offsets
+        assert 'T' not in img.coord_scales
+        assert 'T' not in img.coord_units
+
+
+def test_coords_s():
+    """Test coords['S'] returns color channel names for BGR and BGRA images."""
+    bgr_fname = DATA / 'pylibCZIrw/c1_bgr24.czi'
+    bgra_fname = DATA / 'CZI-testimages/Z-Stack-Anno_RGB.czi'
+
+    if bgr_fname.exists():
+        with CziFile(bgr_fname) as czi:
+            img = czi.scenes[0]
+            assert 'S' in img.dims
+            assert img.sizes['S'] == 3
+            s_coord = img.coords['S']
+            assert list(s_coord) == ['Red', 'Green', 'Blue']
+            assert s_coord.dtype.kind == 'U'
+            # S is absent from numeric coord dicts
+            assert 'S' not in img.coord_offsets
+            assert 'S' not in img.coord_scales
+            assert 'S' not in img.coord_units
+
+    if bgra_fname.exists():
+        with CziFile(bgra_fname) as czi:
+            img = czi.scenes[0]
+            assert 'S' in img.dims
+            assert img.sizes['S'] == 4
+            s_coord = img.coords['S']
+            assert list(s_coord) == ['Red', 'Green', 'Blue', 'Alpha']
+            assert s_coord.dtype.kind == 'U'
+            assert 'S' not in img.coord_offsets
+            assert 'S' not in img.coord_scales
+            assert 'S' not in img.coord_units
+
+    if not bgr_fname.exists() and not bgra_fname.exists():
+        pytest.skip('BGR/BGRA test files not found')
+
+
 def test_roi_no_intersection():
     """Test that roi with no intersecting tiles raises ValueError."""
     filename = DATA / 'Test.czi'
@@ -1220,6 +1365,16 @@ def test_roi_larger_than_image():
         assert int(arr[181:, :].sum()) == 0
         # pixels inside the extent are non-zero (image has data there)
         assert int(arr[:181, :312].sum()) > 0
+
+        # coord_offsets/coords reflect the ROI corner, not pixel 0
+        # pixel size for Test.czi is ~8.303e-7 m
+        roi_img = img(C=0, Z=0, roi=(10, 20, 80, 40))
+        assert roi_img.start == (20, 10)
+        scale = roi_img.coord_scales['X']
+        assert roi_img.coord_offsets['X'] == pytest.approx(10 * scale)
+        assert roi_img.coord_offsets['Y'] == pytest.approx(20 * scale)
+        assert float(roi_img.coords['X'][0]) == pytest.approx(10 * scale)
+        assert float(roi_img.coords['Y'][0]) == pytest.approx(20 * scale)
 
 
 def test_fillvalue():
@@ -2479,6 +2634,10 @@ def test_point_time_series():
         assert intervals.max() == pytest.approx(0.000614, rel=1e-3)
         assert float(ts[-1] - ts[0]) == pytest.approx(49.119, rel=1e-3)
 
+        # no Y dimension in a point scan: mpp is unavailable
+        # spot.czi has X/Y scaling = 0.0 in the XML
+        assert sc.mpp is None
+
 
 def test_scanning_fcs():
     """Test scanning FCS: line scan assembled from 2487 T-chunked subblocks."""
@@ -2541,6 +2700,9 @@ def test_scanning_fcs():
         assert intervals.min() == pytest.approx(0.0002928, rel=1e-3)
         assert intervals.max() == pytest.approx(0.0002928, rel=1e-3)
         assert float(ts[-1] - ts[0]) == pytest.approx(60.0, rel=1e-3)
+
+        # line scan: Y squeezed out, mpp requires both X and Y
+        assert sc.mpp is None
 
 
 def test_lattice_lightsheet_raw_metadata():
@@ -2735,6 +2897,13 @@ def test_spectral_lsm980():
         # midpoints must be strictly increasing
         assert numpy.all(numpy.diff(c_coord) > 0)
 
+        # coord_units: C in nanometer, spatial in meter
+        units = img.coord_units
+        assert units['C'] == 'nanometer'
+        assert units['Y'] == 'meter'
+        assert units['X'] == 'meter'
+        assert 'S' not in units
+
 
 def test_spectral_lsm800():
     """Test LSM800 ChS spectral imaging: overlapping cumulative windows."""
@@ -2790,6 +2959,12 @@ def test_spectral_lsm800():
         ]
         assert list(c_coord[-2:]) == ['650-Ch1', '650-Ch2']
 
+        # coord_units: overlapping wavelengths produce string C, no unit
+        units = img.coord_units
+        assert 'C' not in units
+        assert units['Y'] == 'meter'
+        assert units['X'] == 'meter'
+
 
 def test_spectral_paramecium():
     """Test paramecium.czi: numeric channel names, no DetectionWavelength."""
@@ -2833,6 +3008,28 @@ def test_spectral_paramecium():
         pixel_size = img.coords['X'][1] - img.coords['X'][0]
         assert pixel_size == pytest.approx(8.303e-7, rel=1e-3)
 
+        # coord_offsets: first pixel coordinate per numeric axis
+        offsets = img.coord_offsets
+        assert offsets['X'] == pytest.approx(0.0)
+        assert offsets['Y'] == pytest.approx(0.0)
+        assert offsets['C'] == pytest.approx(423.0)
+
+        # coord_scales: step size per regularly-spaced numeric axis
+        scales = img.coord_scales
+        assert scales['X'] == pytest.approx(8.303e-7, rel=1e-3)
+        assert scales['Y'] == pytest.approx(8.303e-7, rel=1e-3)
+        assert scales['C'] == pytest.approx(10.0)
+
+        # coord_units: C in nanometer (float-parsed names), spatial in meter
+        units = img.coord_units
+        assert units['C'] == 'nanometer'
+        assert units['Y'] == 'meter'
+        assert units['X'] == 'meter'
+
+        # mpp: pixel spacing in um (meters * 1e6)
+        assert img.mpp is not None
+        assert img.mpp == pytest.approx((0.8303, 0.8303), rel=1e-3)
+
 
 def test_airyscan_timestamps():
     """Test Airyscan fast-scan file with zero t_incr uses TimeStamps."""
@@ -2866,10 +3063,13 @@ def test_airyscan_timestamps():
         assert ct[-1] == pytest.approx(ts[-1], rel=1e-9)
         assert numpy.all(numpy.diff(ct) > 0)
 
-        # coords['H'] - Airyscan detector elements get integer indices
-        ch = img.coords['H']
-        assert ch.dtype == numpy.uint8
-        assert list(ch) == list(range(16))
+        # coords['H'] - integer-index-only dims are absent from coords
+        assert 'H' not in img.coords
+
+        # coord_units: T from timestamps not in coord_units, H has no unit
+        units = img.coord_units
+        assert 'T' not in units
+        assert 'H' not in units
 
 
 def test_airyscan_fastscan():
@@ -3000,6 +3200,13 @@ def test_multiscene_mosaic():
         assert coords['Y'][1] - coords['Y'][0] == pytest.approx(4e-7)
         assert coords['X'][0] == pytest.approx(0.0)
         assert coords['X'][1] - coords['X'][0] == pytest.approx(4e-7)
+
+        # coord_units:
+        # T from timestamps not in units, C is string, Z/Y/X in meter
+        units = sc1.coord_units
+        assert units == {'Z': 'meter', 'Y': 'meter', 'X': 'meter'}
+        assert 'T' not in units
+        assert 'C' not in units
 
         arr2 = sc2.asarray(maxworkers=1)
         assert int(arr2.sum()) == 12769120769
@@ -3407,6 +3614,7 @@ def test_glob(filename):
                     continue
                 str(level)
                 _ = level.coords
+                _ = level.coord_units
                 _ = level.attrs
                 _ = level.directory_entries
                 _ = level.channels
@@ -3620,7 +3828,7 @@ def pylibczirw_read_scene(czidoc, image, scene, has_scenes):
         Pixel array with the same shape and dtype as ``image.asarray()``.
 
     """
-    roi = image.bbox  # (x, y, w, h) — absolute pixel coords
+    roi = image.bbox  # (x, y, w, h) - absolute pixel coords
     scene = scene if has_scenes else None
     # Always pass the explicit roi to get the exact spatial extent matching
     # image.bbox; pylibCZIrw's auto-derived scene roi is tile-rounded and
