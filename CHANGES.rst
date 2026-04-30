@@ -1,6 +1,15 @@
 Revisions
 =========
 
+2026.4.30
+
+- Omit axes from coords when no meaningful metadata is available (breaking).
+- Return coords['T'] as float seconds instead of datetime64 (breaking).
+- Replace pixel_series with coord_scales in CziImage.attrs (breaking).
+- Add coord_offsets, coord_scales, coord_units, and mpp properties to CziImage.
+- Add datetime property to CziImage returning acquisition start as datetime64.
+- Drop support for numpy 2.0 (SPEC0).
+
 2026.4.11
 
 - Fall back to parsing numeric channel names as float coords['C'].
