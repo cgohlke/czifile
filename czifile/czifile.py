@@ -47,7 +47,7 @@ file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.4.11
+:Version: 2026.4.30
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -72,12 +72,21 @@ This revision was tested with the following requirements and dependencies
 - `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.4 64-bit
 - `NumPy <https://pypi.org/project/numpy>`_ 2.4.4
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.3.6
-- `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.3.3 (optional)
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.4.0 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.9 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.4.11 (optional)
 
 Revisions
 ---------
+
+2026.4.30
+
+- Omit axes from coords when no meaningful metadata is available (breaking).
+- Return coords['T'] as float seconds instead of datetime64 (breaking).
+- Replace pixel_series with coord_scales in CziImage.attrs (breaking).
+- Add coord_offsets, coord_scales, coord_units, and mpp properties to CziImage.
+- Add datetime property to CziImage returning acquisition start as datetime64.
+- Drop support for numpy 2.0 (SPEC0).
 
 2026.4.11
 
@@ -376,7 +385,7 @@ View the images and metadata in a CZI file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.4.11'
+__version__ = '2026.4.30'
 
 __all__ = [
     'CONVERT_PIXELTYPE',
@@ -598,8 +607,8 @@ class BinaryFile:
         file:
             File name or seekable binary stream.
         mode:
-            File open mode if `file` is a file name.
-            If not specified, defaults to 'r'. Files are always opened
+            File open mode if ``file`` is a file name.
+            If not specified, defaults to ``'r'``. Files are always opened
             in binary mode.
 
     Raises:
@@ -643,7 +652,7 @@ class BinaryFile:
                 if mode[-1:] == 'b':
                     # accept 'rb'/'r+b'
                     mode = mode[:-1]  # type: ignore[assignment]
-                if mode not in ('r', 'r+'):
+                if mode not in {'r', 'r+'}:
                     msg = f'invalid {mode=!r}'
                     raise ValueError(msg)
             self._path = os.path.abspath(file)
@@ -791,7 +800,7 @@ class CziFile(BinaryFile):
             CZI file to read.
             Open file objects must be positioned at CZI header.
         mode:
-            File open mode if `file` is file name. Defaults to ``'r'``.
+            File open mode if ``file`` is file name. Defaults to ``'r'``.
         squeeze:
             If True, remove dimensions of length 1 from results.
 
@@ -826,9 +835,9 @@ class CziFile(BinaryFile):
         mode_: Literal['r', 'r+'] | None = None
         if mode is None:
             mode_ = None
-        elif mode in ('r', 'rb'):
+        elif mode in {'r', 'rb'}:
             mode_ = 'r'
-        elif mode in ('r+', 'r+b'):
+        elif mode in {'r+', 'r+b'}:
             mode_ = 'r+'
         super().__init__(file, mode=mode_)
 
@@ -938,7 +947,7 @@ class CziFile(BinaryFile):
     def metadata(self, *, asdict: bool = False) -> str | dict[str, Any]:
         """Return data of CziMetadataSegmentData from file.
 
-        Returns an empty string, or ``{}`` when ``asdict=True``, if no
+        Return an empty string, or ``{}`` when ``asdict=True``, if no
         CziMetadataSegmentData is found.
 
         Parameters:
@@ -1043,10 +1052,10 @@ class CziFile(BinaryFile):
                 # full_res (e.g. Airyscan H/C channels), keep all entries.
                 ref_dims = filtered[0].dims
                 yx_set = frozenset(
-                    i for i, d in enumerate(ref_dims) if d in ('Y', 'X', 'S')
+                    i for i, d in enumerate(ref_dims) if d in {'Y', 'X', 'S'}
                 )
 
-                def _ns_key(
+                def ns_key(
                     e: CziDirectoryEntryDV,
                 ) -> tuple[int, ...]:
                     if e.dims == ref_dims:
@@ -1060,8 +1069,8 @@ class CziFile(BinaryFile):
                         if i not in yx_set
                     )
 
-                full_res_keys = {_ns_key(e) for e in full_res}
-                pyramid_keys = {_ns_key(e) for e in filtered if e.is_pyramid}
+                full_res_keys = {ns_key(e) for e in full_res}
+                pyramid_keys = {ns_key(e) for e in filtered if e.is_pyramid}
                 if pyramid_keys <= full_res_keys:
                     filtered = full_res
         if any(entry.mosaic_index >= 0 for entry in filtered):
@@ -1349,7 +1358,7 @@ class CziImage:
 
         **Dimension selection**
         (``**kwargs`` to :py:meth:`CziImage.__call__`):
-        An integer value such as ``T=0`` or ``C=1`` selects subblocks whose
+        an integer value such as ``T=0`` or ``C=1`` selects subblocks whose
         file-level start coordinate for that dimension equals the given value.
         If the file's T axis starts at 5, use ``T=5`` to select the first
         time point - ``T=0`` would match nothing.
@@ -1363,7 +1372,8 @@ class CziImage:
         from ``**selection``: use ``roi`` for spatial cropping and
         :py:class:`CziScenes` (:py:attr:`CziFile.scenes`) for scene selection.
 
-        **Dimension ordering**: the output axis order follows three groups:
+        **Dimension ordering**:
+        the output axis order follows three groups:
         (1) unspecified non-spatial dimensions, in their original file order;
         (2) explicitly specified dimensions (including ``None``), in the order
         they appear as keyword arguments;
@@ -1372,21 +1382,21 @@ class CziImage:
         output. Use :py:attr:`CziImage.dims` or :py:attr:`CziImage.sizes`
         to read back the resulting order.
 
-        **ROI** (``roi`` parameter): ``(x, y, width, height)`` are global
-        pixel coordinates, matching the values in :py:attr:`CziImage.bbox`
-        and :py:attr:`CziImage.start`.
+        **ROI** (``roi`` parameter):
+        ``(x, y, width, height)`` are global pixel coordinates, matching the
+        values in :py:attr:`CziImage.bbox` and :py:attr:`CziImage.start`.
 
         **Squeeze and size-1 dimensions**:
         when ``squeeze=True`` (the default), dimensions of length 1 are
         removed from :py:attr:`CziImage.dims`, :py:attr:`CziImage.start`,
         and the :py:class:`CziImageChunks` iteration axes.
-        Disable squeeze with ``CziFile(file, squeeze=False)`` when you
-        need to access all coordinate axes unconditionally.
+        Disable squeeze with ``CziFile(file, squeeze=False)`` to access
+        all coordinate axes unconditionally.
 
-        **Scene access** (:py:class:`CziScenes`): scene selection uses the
-        absolute S-coordinate, consistent with all other dimension access.
-        Here, S-coordinate refers to scene indices, not the sample
-        dimension ``S``.
+        **Scene access** (:py:class:`CziScenes`):
+        scene selection uses the absolute S-coordinate, consistent with all
+        other dimension access. Here, S-coordinate refers to scene indices,
+        not the sample dimension ``S``.
         ``czi.scenes[4]`` selects the scene whose S-coordinate is 4 in the
         file. ``KeyError`` is raised for an unknown S-coordinate.
         ``czi.scenes(scene=slice(2, 5))`` returns a merged image of all
@@ -1539,7 +1549,7 @@ class CziImage:
         raw = self._raw_sizes
         dims_list = list(raw.keys())
         for dim in selection:
-            if dim in ('X', 'Y', 'S'):
+            if dim in {'X', 'Y', 'S'}:
                 if dim == 'S':
                     msg = (
                         "'S' is the scene/sample dimension: "
@@ -1666,7 +1676,7 @@ class CziImage:
     def scene_indices(self) -> tuple[int, ...] | None:
         """Absolute S-coordinates of this image's scene(s), or None.
 
-        Returns a sorted tuple of S-coordinate values as stored in the CZI
+        Return a sorted tuple of S-coordinate values as stored in the CZI
         file - the same values used as keys in :py:class:`CziScenes`.
 
         * Single scene at S=2: ``(2,)``
@@ -1676,7 +1686,7 @@ class CziImage:
         * File with no explicit S dimension (implicit): ``None``
 
         Roundtrip: ``czi.scenes(scene=image.scene_indices)`` reproduces this
-        image. Returns ``None`` for implicit single-scene files.
+        image. Return ``None`` for implicit single-scene files.
 
         """
         seen = sorted(
@@ -1806,163 +1816,257 @@ class CziImage:
         return (x, y, w, h)
 
     @cached_property
+    def _coords(
+        self,
+    ) -> dict[str, tuple[float, float]]:
+        """Numeric coordinate parameters per axis.
+
+        Map dimension to tuple of:
+
+        - *offset*: coordinate value of first pixel.
+        - *scale*: step between consecutive pixels
+          (0 if irregular or only one pixel along that axis).
+
+        Only axes with physical coordinates are included.
+        T without metadata interval, non-numeric C, and integer-index-only
+        dimensions are absent.
+
+        """
+        result: dict[str, tuple[float, float]] = {}
+        scale_xyz: dict[str, float] = {}
+        root = self._parent.xml_element
+        if root is not None:
+            for dist in root.findall('.//Scaling/Items/Distance'):
+                axis = dist.get('Id')
+                val = dist.findtext('Value')
+                if axis and val:
+                    try:
+                        scale_xyz[axis] = float(val)
+                    except ValueError:
+                        pass
+
+        # T interval from metadata
+        scale_t: float | None = None
+        if root is not None:
+            txt = root.findtext('.//Interval/TimeSpan/Value')
+            if txt:
+                try:
+                    scale_t = float(txt)
+                except ValueError:
+                    pass
+                else:
+                    if scale_t <= 0.0:
+                        scale_t = None
+                    else:
+                        unit_txt = root.findtext(
+                            './/Interval/TimeSpan/DefaultUnitFormat'
+                        )
+                        if unit_txt and unit_txt.lower() == 'ms':
+                            scale_t /= 1000.0
+
+        for dim, start in zip(self.dims, self.start, strict=True):
+            if dim in scale_xyz:
+                s = scale_xyz[dim]
+                result[dim] = (start * s, s)
+            elif dim == 'T':
+                if scale_t is not None:
+                    result[dim] = (start * scale_t, scale_t)
+            elif dim == 'C':
+                cv = self._coords_c
+                if cv is not None:
+                    step = 0.0
+                    if len(cv) >= 2:
+                        s0 = cv[1] - cv[0]
+                        if s0 != 0.0 and all(
+                            abs((cv[i + 1] - cv[i]) - s0) < 1e-6
+                            for i in range(len(cv) - 1)
+                        ):
+                            step = s0
+                    result[dim] = (cv[0], step)
+        return result
+
+    @cached_property
+    def _coords_c(self) -> tuple[float, ...] | None:
+        """Numeric channel coordinate values in nanometres, or None.
+
+        Return DetectionWavelength midpoints or parsed float channel names
+        or None for non-numeric channels.
+
+        """
+        dims = self.dims
+        if 'C' not in dims:
+            return None
+        start = self.start[dims.index('C')]
+        size = self.shape[dims.index('C')]
+        channel_list = list(self.channels.items())
+        ch_slice = channel_list[start : start + size]
+        dw_ranges: list[tuple[float, float]] = []
+        for _name, ch_data in ch_slice:
+            dw = ch_data.get('DetectionWavelength')
+            if isinstance(dw, tuple):
+                dw_ranges.append(dw)
+            elif isinstance(dw, (int, float)):
+                dw_ranges.append((float(dw), float(dw)))
+            else:
+                break
+        if len(dw_ranges) == size:
+            sorted_dw = sorted(dw_ranges)
+            non_overlapping = all(
+                sorted_dw[i][1] <= sorted_dw[i + 1][0]
+                for i in range(len(sorted_dw) - 1)
+            )
+            if non_overlapping:
+                return tuple((lo + hi) / 2.0 for lo, hi in dw_ranges)
+            return None
+        names = [name for name, _ in ch_slice]
+        if len(names) == size and all(names):
+            try:
+                values = tuple(float(n) for n in names)
+            except ValueError:
+                pass
+            else:
+                return values
+        return None
+
+    @cached_property
     def coords(self) -> Mapping[str, NDArray[Any]]:
         """Mapping of dimension names to physical coordinate arrays.
+
+        Only dimensions with meaningful physical coordinates are included.
+        Dimensions without metadata (integer-index-only) are absent.
 
         Spatial dimensions (X, Y, Z) use pixel spacing in meters from CZI
         scaling metadata.
 
-        T uses acquisition datetimes when both acquisition time and interval
-        metadata are available, seconds elapsed since acquisition start when
-        only interval metadata is available, falls back to the TimeStamps
-        attachment otherwise, or integer indices if no timing metadata exists.
+        T uses elapsed seconds from interval metadata when available,
+        or the TimeStamps attachment as fallback.
+        See :py:attr:`datetime` for the acquisition wall-clock time.
+        When T comes from the TimeStamps attachment only (no interval
+        metadata), it is absent from :py:attr:`coord_offsets`,
+        :py:attr:`coord_scales`, and :py:attr:`coord_units`.
 
-        C uses the midpoint of `DetectionWavelength` in nanometres from
+        C uses the midpoint of ``DetectionWavelength`` in nanometres from
         :py:attr:`channels` when that field is present for every channel in
         the slice and the ranges are mutually non-overlapping (narrow
         spectral bins, for example LSM980 spectral imaging). When the ranges
-        overlap, channel names are used instead. When `DetectionWavelength`
+        overlap, channel names are used instead. When ``DetectionWavelength``
         is absent, channel names are used; if all names parse as floats
         (for example, wavelengths encoded as names like ``'480'``), a float
-        array is returned. Falls back to integer indices if names are absent.
+        array is returned.
+
+        S (color samples) return ``['Red', 'Green', 'Blue']`` for RGB images
+        and ``['Red', 'Green', 'Blue', 'Alpha']`` for RGBA images.
+        Absent for grayscale images (S squeezed away or S=1).
 
         """
         result: dict[str, NDArray[Any]] = {}
-        root = self._parent.xml_element
-        if root is None:
-            return result
+        params = self._coords
 
-        # pixel spacing in meters per axis id
-        scaling: dict[str, float] = {}
-        for dist in root.findall('.//Scaling/Items/Distance'):
-            axis = dist.get('Id')
-            val = dist.findtext('Value')
-            if axis and val:
-                try:
-                    scaling[axis] = float(val)
-                except ValueError:
-                    pass
-
-        # T interval in seconds from experiment setup metadata
-        t_incr: float | None = None
-        t_incr_txt = root.findtext('.//Interval/TimeSpan/Value')
-        t_unit_txt = root.findtext('.//Interval/TimeSpan/DefaultUnitFormat')
-        if t_incr_txt:
-            try:
-                v = float(t_incr_txt)
-                if v > 0.0:
-                    if t_unit_txt and t_unit_txt.lower() == 'ms':
-                        v /= 1000.0
-                    t_incr = v
-            except ValueError:
-                pass
-
-        acq_time_str = root.findtext('.//AcquisitionDateAndTime')
-        sentinel = '0001-01-01T00:00:00'
-        acq_time: numpy.datetime64 | None = None
-        if acq_time_str and not acq_time_str.startswith(sentinel):
-            try:
-                # strip timezone indicator (Z or HH:MM) to avoid NumPy 2.x
-                # UserWarning about timezone representation in datetime64
-                acq_time_clean = re.sub(
-                    r'Z$|[+-]\d{2}:\d{2}$', '', acq_time_str
-                ).replace(' ', 'T')
-                acq_time = numpy.datetime64(acq_time_clean, 'ns')
-            except (ValueError, OverflowError):
-                pass
-
-        for dim, start_val, size_val in zip(
+        for dim, start, size in zip(
             self.dims, self.start, self.shape, strict=True
         ):
-            if dim in scaling:
-                result[dim] = (
-                    numpy.arange(start_val, start_val + size_val)
-                    * scaling[dim]
-                )
+            p = params.get(dim)
+            if p is not None and dim not in {'T', 'C'}:
+                result[dim] = numpy.arange(start, start + size) * p[1]
             elif dim == 'T':
-                if t_incr is not None and acq_time is not None:
-                    dt_ns = round(t_incr * 1e9)
-                    result[dim] = numpy.array(
-                        [
-                            acq_time
-                            + numpy.timedelta64((start_val + i) * dt_ns, 'ns')
-                            for i in range(size_val)
-                        ],
-                        dtype='datetime64[ns]',
-                    )
-                elif t_incr is not None:
-                    result[dim] = (
-                        numpy.arange(start_val, start_val + size_val) * t_incr
-                    )
+                if p is not None:
+                    result[dim] = numpy.arange(start, start + size) * p[1]
                 else:
-                    # try TimeStamps attachment as fallback
                     att_ts = self._parent.timestamps
-                    if att_ts is not None and start_val + size_val <= len(
-                        att_ts
-                    ):
-                        result[dim] = att_ts[start_val : start_val + size_val]
-                    else:
-                        result[dim] = numpy.arange(
-                            start_val, start_val + size_val
-                        )
+                    if att_ts is not None and start + size <= len(att_ts):
+                        result[dim] = att_ts[start : start + size]
             elif dim == 'C':
-                channel_list = list(self.channels.items())
-                ch_slice = channel_list[start_val : start_val + size_val]
-                # collect (lo, hi) pairs; scalar DetectionWavelength -> (v, v)
-                dw_ranges: list[tuple[float, float]] = []
-                for _name, ch_data in ch_slice:
-                    dw = ch_data.get('DetectionWavelength')
-                    if isinstance(dw, tuple):
-                        dw_ranges.append(dw)
-                    elif isinstance(dw, (int, float)):
-                        dw_ranges.append((float(dw), float(dw)))
-                    else:
-                        break
-                if len(dw_ranges) == size_val:
-                    # use midpoints only for non-overlapping ranges
-                    # (LSM980-style narrow bins); overlapping ranges indicate
-                    # LSM800 ChS cumulative integration windows where the
-                    # channel name is the more meaningful coordinate
-                    sorted_dw = sorted(dw_ranges)
-                    non_overlapping = all(
-                        sorted_dw[i][1] <= sorted_dw[i + 1][0]
-                        for i in range(len(sorted_dw) - 1)
-                    )
-                    if non_overlapping:
-                        result[dim] = numpy.array(
-                            [(lo + hi) / 2.0 for lo, hi in dw_ranges]
-                        )
-                    else:
-                        names_slice = [name for name, _ in ch_slice]
-                        result[dim] = numpy.array(names_slice)
+                cv = self._coords_c
+                if cv is not None:
+                    result[dim] = numpy.array(cv)
                 else:
+                    channel_list = list(self.channels.items())
+                    ch_slice = channel_list[start : start + size]
                     names_slice = [name for name, _ in ch_slice]
-                    if len(names_slice) == size_val and all(names_slice):
-                        # if all names parse as floats (e.g. wavelengths
-                        # encoded as names), prefer numeric coordinates
-                        try:
-                            result[dim] = numpy.array(
-                                [float(n) for n in names_slice]
-                            )
-                        except ValueError:
-                            result[dim] = numpy.array(names_slice)
-                    else:
-                        result[dim] = numpy.arange(
-                            start_val, start_val + size_val
-                        )
-            else:
-                result[dim] = numpy.arange(
-                    start_val,
-                    start_val + size_val,
-                    dtype=numpy.min_scalar_type(start_val + size_val - 1),
-                )
+                    if len(names_slice) == size and all(names_slice):
+                        result[dim] = numpy.array(names_slice)
+            elif dim == 'S' and size > 1:
+                sample_names = ('Red', 'Green', 'Blue', 'Alpha')
+                result[dim] = numpy.array(sample_names[:size])
         return MappingProxyType(result)
+
+    @cached_property
+    def coord_offsets(self) -> dict[str, float]:
+        """Coordinate offsets (first pixel position) per axis.
+
+        Map dimension character codes to the coordinate value of the
+        first pixel. Only axes with numeric coordinates are included.
+        Values are always float.
+
+        """
+        return {d: offset for d, (offset, _) in self._coords.items()}
+
+    @cached_property
+    def coord_scales(self) -> dict[str, float]:
+        """Coordinate step sizes per axis.
+
+        Map dimension character codes to the spacing between consecutive
+        coordinate values. Only axes with numeric, regularly spaced
+        coordinates are included.
+        For non-spatial axes (T, C), axes with fewer than two elements
+        are excluded because the step cannot be determined.
+
+        """
+        sizes = self.sizes
+        return {
+            d: scale
+            for d, (_, scale) in self._coords.items()
+            if scale != 0.0 and (d not in {'T', 'C'} or sizes.get(d, 0) >= 2)
+        }
+
+    @property
+    def coord_units(self) -> dict[str, str]:
+        """Coordinate unit strings per axis.
+
+        Map dimension character codes to their full name unit string.
+        Only axes with numeric coordinates are included.
+
+        """
+        _units: dict[str, str] = {'T': 'second', 'C': 'nanometer'}
+        return {d: _units.get(d, 'meter') for d in self._coords}
+
+    @cached_property
+    def mpp(self) -> tuple[float, float] | None:
+        """Pixel spacing in micrometer as (mpp-x, mpp-y), or None."""
+        cx = self._coords.get('X')
+        cy = self._coords.get('Y')
+        if cx is None or cy is None or cx[1] <= 0.0 or cy[1] <= 0.0:
+            return None
+        return (cx[1] * 1e6, cy[1] * 1e6)
+
+    @cached_property
+    def datetime(self) -> numpy.datetime64 | None:
+        """Acquisition start datetime from file metadata, or None.
+
+        Parsed from the ``AcquisitionDateAndTime`` XML field.
+        Timezone information is stripped before parsing.
+        Return None when the field is absent, contains the zero sentinel
+        (``0001-01-01T00:00:00``), or cannot be parsed.
+
+        """
+        root = self._parent.xml_element
+        if root is None:
+            return None
+        s = root.findtext('.//AcquisitionDateAndTime')
+        sentinel = '0001-01-01T00:00:00'
+        if not s or s.startswith(sentinel):
+            return None
+        try:
+            clean = re.sub(r'Z$|[+-]\d{2}:\d{2}$', '', s).replace(' ', 'T')
+            return numpy.datetime64(clean, 'ns')
+        except (ValueError, OverflowError):
+            return None
 
     @cached_property
     def channels(self) -> Mapping[str, dict[str, Any]]:
         """Per-channel metadata keyed by channel name.
 
-        Returns a dict keyed by channel name (falling back to channel Id
+        Return a dict keyed by channel name (falling back to channel Id
         when no name is available).
 
         Each value is a dict whose keys are XML tag names from the
@@ -2073,7 +2177,7 @@ class CziImage:
     def objective(self) -> Mapping[str, Any]:
         """Objective lens metadata keyed by XML tag name.
 
-        Returns a dict containing a subset of the Objective XML element
+        Return a dict containing a subset of the Objective XML element
         tags defined in the ZISRAW specification.
 
         """
@@ -2111,22 +2215,7 @@ class CziImage:
 
     @cached_property
     def attrs(self) -> Mapping[str, Any]:
-        """Image metadata as dict.
-
-        Contains ``filepath`` always. When CZI metadata is available,
-        also includes:
-
-        ``datetime``
-            ISO-8601 acquisition date/time string.
-        ``pixel_size``
-            Dict mapping axis ids (``'X'``, ``'Y'``, ``'Z'``) to physical
-            pixel spacing in meters.
-        ``objective``
-            Objective lens metadata. See :py:attr:`objective`.
-        ``channels``
-            Per-channel metadata. See :py:attr:`channels`.
-
-        """
+        """Image metadata as dict."""
         result: dict[str, Any] = {
             'filepath': self._parent._path,
         }
@@ -2134,31 +2223,18 @@ class CziImage:
         if root is None:
             return MappingProxyType(result)
 
-        # acquisition datetime
-        sentinel = '0001-01-01T00:00:00'
-        dt_str = root.findtext('.//AcquisitionDateAndTime')
-        if dt_str and not dt_str.startswith(sentinel):
-            result['datetime'] = dt_str
-
-        # pixel spacing in meters
-        pixel_size: dict[str, float] = {}
-        for dist in root.findall('.//Scaling/Items/Distance'):
-            axis = dist.get('Id')
-            val = dist.findtext('Value')
-            if axis and val:
-                try:
-                    pixel_size[axis] = float(val)
-                except ValueError:
-                    pass
-        if pixel_size:
-            result['pixel_size'] = pixel_size
-
-        objective = self.objective
-        if objective:
-            result['objective'] = objective
-
-        if self.channels:
-            result['channels'] = self.channels
+        if self.datetime is not None:
+            result['datetime'] = self.datetime
+        for key in (
+            'coord_offsets',
+            'coord_scales',
+            'coord_units',
+            'channels',
+            'objective',
+        ):
+            val = getattr(self, key)
+            if val:
+                result[key] = val
 
         return MappingProxyType(result)
 
@@ -2895,17 +2971,17 @@ class CziImage:
     def _default_maxworkers(self) -> int:
         """Default maxworkers for parallel tile compositing.
 
-        Returns ``1`` for:
+        Return ``1`` for:
 
         - uncompressed images - no CPU-bound decompression, so threading
-          overhead exceeds any benefit;
+          overhead exceeds any benefit
         - mosaic images (first entry carries a mosaic index) - tiles may
           overlap at seams and higher-M-index tiles must be composited on
-          top, so sequential compositing order must be preserved;
+          top, so sequential compositing order must be preserved
         - images with fewer than 3 entries - thread-pool overhead exceeds
           any parallelism benefit for 1 or 2 tasks.
 
-        Otherwise returns :py:func:`default_maxworkers()`
+        Otherwise return :py:func:`default_maxworkers()`
         (typically half the available CPU cores).
 
         """
@@ -3149,7 +3225,7 @@ class CziImageChunks:
 
                 # add None for dims kept in chunk
                 for dim, sz in sizes.items():
-                    if sz is None and dim not in ('Y', 'X', 'S'):
+                    if sz is None and dim not in {'Y', 'X', 'S'}:
                         selection[dim] = None
 
                 if not entries:
@@ -3524,7 +3600,7 @@ class CziScenes(collections.abc.Mapping[int, CziImage]):
             entries = tuple(
                 e
                 for e in self._parent.filtered_subblock_directory
-                if e.pyramid_type == 0 and e.scene_index in (-1, key)
+                if e.pyramid_type == 0 and e.scene_index in {-1, key}
             )
         name = f'Scene {key}'
         if not entries:
@@ -3546,7 +3622,7 @@ class CziScenes(collections.abc.Mapping[int, CziImage]):
             pyramid_entries = [
                 e
                 for e in self._parent.subblock_directory
-                if e.pyramid_type != 0 and e.scene_index in (-1, key)
+                if e.pyramid_type != 0 and e.scene_index in {-1, key}
             ]
         if pyramid_entries:
             # group by scale factor
@@ -3776,7 +3852,7 @@ class CziFileHeaderSegmentData(CziSegmentData):
             self.attachment_directory_position,
         ) = struct.unpack('<iiii16s16siqqiq', segment.filehandle.read(80))
         self.version = (major, minor)
-        self.update_pending = bool(self.update_pending)
+        self.update_pending = bool(self.update_pending)  # 0xffff = True
         self.primary_file_guid = uuid.UUID(bytes=primary_file_guid)
         self.file_guid = uuid.UUID(bytes=file_guid)
 
@@ -3943,7 +4019,7 @@ class CziSubBlockSegmentData(CziSegmentData):
             asdict:
                 If true, return metadata as dict, else XML (default).
             fixesc:
-                If true (default), replace `&lt;` and `&gt;` with `<` and `>`.
+                Replace ``&lt;`` and ``&gt;`` with ``<`` and ``>``.
                 Fixes frequent, unparsable XML elements.
 
         """
@@ -4038,15 +4114,15 @@ class CziSubBlockSegmentData(CziSegmentData):
                     else:
                         break
                 offset = header_size
-                # Use memoryview to avoid copying compressed bytes
-                # when skipping the small fixed-size ZSTD1 header.
+                # use memoryview to avoid copying compressed bytes
+                # when skipping the small fixed-size ZSTD1 header
                 image = decode(memoryview(data)[offset:], out=size)
                 image = numpy.frombuffer(image, dtype)
                 if hilo:
                     image = imagecodecs.byteshuffle_decode(image)
             else:
                 image = decode(data, out=size)
-                if compression in (2, 5):
+                if compression in {2, 5}:
                     # LZW, ZSTD
                     image = numpy.frombuffer(image, dtype)
         elif compression == 0 or compression > 999:
@@ -4082,7 +4158,7 @@ class CziSubBlockSegmentData(CziSegmentData):
                         break
                     adjusted[i] = s  # reset and try next dim
         image = image.reshape(shape)
-        if compression not in (1, 4):
+        if compression not in {1, 4}:
             if shape[-1] == 3:
                 # BGR -> RGB
                 image = image[..., ::-1].copy()
@@ -4834,7 +4910,7 @@ class CziAttachmentEntryA1:
             *(
                 f'{name}: {getattr(self, name)}'
                 for name in CziAttachmentEntryA1.__slots__
-                if name not in ('name', 'offset')
+                if name not in {'name', 'offset'}
             ),
         )
 
@@ -6151,39 +6227,40 @@ def create_output(
 
     Parameters:
         out:
-            Kind of array of `shape` and `dtype` to return:
+            Kind of array of ``shape`` and ``dtype`` to return:
 
-                `None`:
+                ``None``:
                     Return new array.
-                `numpy.ndarray`:
+                ``numpy.ndarray``:
                     Return view of existing array.
-                `'memmap'` or `'memmap:tempdir'`:
+                ``'memmap'`` or ``'memmap:tempdir'``:
                     Return memory-map to array stored in temporary binary file.
-                `str` or open file:
+                ``str`` or open file:
                     Return memory-map to array stored in specified binary file.
         shape:
             Shape of array to return.
         dtype:
             Data type of array to return.
-            If `out` is an existing array, `dtype` must be castable to its
+            If ``out`` is an existing array, ``dtype`` must be castable to its
             data type.
         mode:
             File mode to create memory-mapped array.
             Default: ``'w+'``. Creates new or overwrites existing file for
             reading and writing.
         suffix:
-            Suffix of `NamedTemporaryFile` if `out` is ``'memmap'``.
+            Suffix of ``NamedTemporaryFile`` if ``out`` is ``'memmap'``.
             Default: ``'.memmap'``.
         fillvalue:
             Value to initialize output array.
             By default, return uninitialized array.
 
     Returns:
-        NumPy array or memory-mapped array of `shape` and `dtype`.
+        NumPy array or memory-mapped array of ``shape`` and ``dtype``.
 
     Raises:
         ValueError:
-            Existing array cannot be reshaped to `shape` or cast to `dtype`.
+            Existing array cannot be reshaped to ``shape``
+            or cast to ``dtype``.
 
     """
     shape = tuple(shape)
@@ -6202,7 +6279,7 @@ def create_output(
             msg = f'cannot cast {dtype} to {out.dtype}'
             raise ValueError(msg)
         if out.shape != shape:
-            out = out.reshape(shape)
+            out = out.reshape(shape, copy=False)
         if fillvalue is not None:
             out[...] = fillvalue
         return out
@@ -6233,37 +6310,6 @@ def product(iterable: Iterable[int], /) -> int:
     for i in iterable:
         prod *= int(i)
     return prod
-
-
-def parse_kwargs(
-    kwargs: dict[str, Any], /, *keys: str, **keyvalues: Any
-) -> dict[str, Any]:
-    """Extract keys from kwargs into a new dict, removing them from kwargs.
-
-    Keys listed in `keys` are extracted by name only.
-    Keys listed in `keyvalues` are extracted by name if present in `kwargs`,
-    otherwise their default value is used.
-    Extracted keys are deleted from `kwargs`.
-
-    >>> kwargs = {'one': 1, 'two': 2, 'four': 4}
-    >>> parse_kwargs(kwargs, 'two', 'three', four=None, five=5)
-    {'two': 2, 'four': 4, 'five': 5}
-    >>> kwargs
-    {'one': 1}
-    >>> parse_kwargs({}, 'a', b=2)
-    {'b': 2}
-
-    """
-    result = {}
-    for key in keys:
-        if key in kwargs:
-            result[key] = kwargs.pop(key)
-    for key, value in keyvalues.items():
-        if key in kwargs:
-            result[key] = kwargs.pop(key)
-        else:
-            result[key] = value
-    return result
 
 
 def xml2dict(
@@ -6370,7 +6416,7 @@ def asbool(
 ) -> bool:
     """Return string as bool if possible, else raise TypeError.
 
-    Custom `true` and `false` sequences must contain lowercase strings.
+    Custom ``true`` and ``false`` sequences must contain lowercase strings.
 
     >>> asbool(b' False ')
     False
@@ -6471,7 +6517,7 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         xarray = None
 
-    def _parse_dim_value(s: str) -> int | slice | list[int] | None:
+    def parse_dim_value(s: str) -> int | slice | list[int] | None:
         """Parse dimension selection from a CLI string.
 
         Accepted forms:
@@ -6482,7 +6528,7 @@ def main(argv: list[str] | None = None) -> int:
             0,2,4      -> [0, 2, 4]
 
         """
-        if s.lower() in ('none', ''):
+        if s.lower() in {'none', ''}:
             return None
         if ':' in s:
             parts = [int(p) if p else None for p in s.split(':')]
@@ -6491,7 +6537,7 @@ def main(argv: list[str] | None = None) -> int:
             return [int(p) for p in s.split(',')]
         return int(s)
 
-    class _DimAction(argparse.Action):
+    class DimAction(argparse.Action):
         """Record dimension arguments in the order they appear on the CLI."""
 
         def __call__(
@@ -6590,10 +6636,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument(
             f'--{_dim}',
             dest=_dim,
-            type=_parse_dim_value,
+            type=parse_dim_value,
             default=argparse.SUPPRESS,
             metavar='SEL',
-            action=_DimAction,
+            action=DimAction,
             help=_dim_help.format(name=_name),
         )
 
@@ -6626,7 +6672,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         files = args.files
 
-    def _show_czi(czi: CziImage, /, *, plot: bool = True) -> bool:
+    def show_czi(czi: CziImage, /, *, plot: bool = True) -> bool:
         """Print and optionally plot one CziImage. Return True if plotted."""
         print(czi)
         print()
@@ -6682,7 +6728,7 @@ def main(argv: list[str] | None = None) -> int:
                             if lvl.nbytes < 2**31:
                                 image = lvl  # noqa: PLW2901
                                 break
-                    plotted = _show_czi(
+                    plotted = show_czi(
                         image(
                             pixeltype=pixeltype,
                             storedsize=args.storedsize,
