@@ -20,7 +20,7 @@ file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.4.11
+:Version: 2026.4.30
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -45,12 +45,21 @@ This revision was tested with the following requirements and dependencies
 - `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.4 64-bit
 - `NumPy <https://pypi.org/project/numpy>`_ 2.4.4
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.3.6
-- `Xarray <https://pypi.org/project/xarray>`_ 2026.2.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.8 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.3.3 (optional)
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.4.0 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.9 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.4.11 (optional)
 
 Revisions
 ---------
+
+2026.4.30
+
+- Omit axes from coords when no meaningful metadata is available (breaking).
+- Return coords['T'] as float seconds instead of datetime64 (breaking).
+- Replace pixel_series with coord_scales in CziImage.attrs (breaking).
+- Add coord_offsets, coord_scales, coord_units, and mpp properties to CziImage.
+- Add datetime property to CziImage returning acquisition start as datetime64.
+- Drop support for numpy 2.0 (SPEC0).
 
 2026.4.11
 
