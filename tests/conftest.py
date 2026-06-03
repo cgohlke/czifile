@@ -23,7 +23,6 @@ def pytest_configure(config):
 def pytest_report_header(config):
     """Return pytest report header."""
     try:
-        from fsspec import __version__ as fsspec
         from numpy import __version__ as numpy
         from test_czifile import config
         from tifffile import __version__ as tifffile
@@ -38,10 +37,9 @@ def pytest_report_header(config):
             f'Python {sys.version.splitlines()[0]}\n'
             f'packagedir: {czifile.__path__[0]}\n'
             f'versions: czifile-{czifile.__version__}, '
-            f'tifffile-{tifffile}, '
-            f'imagecodecs-{imagecodecs}, '
             f'numpy-{numpy}, '
-            f'fsspec-{fsspec}\n'
+            f'imagecodecs-{imagecodecs}, '
+            f'tifffile-{tifffile}, '
             f'test config: {config()}'
         )
     except Exception as exc:
