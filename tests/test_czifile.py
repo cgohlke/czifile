@@ -29,7 +29,7 @@
 
 """Unittests for the czifile package.
 
-:Version: 2026.4.30
+:Version: 2026.6.6
 
 """
 
@@ -45,6 +45,7 @@ import sys
 import sysconfig
 import warnings
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy
 import pytest
@@ -84,7 +85,6 @@ from czifile import (
 from czifile.czifile import (
     BinaryFile,
     DecodeCache,
-    NullLock,
     default_maxworkers,
     match_filename,
 )
@@ -227,7 +227,7 @@ class TestBinaryFile:
                 pass
 
         with pytest.raises(ValueError):
-            BinaryFile(File)
+            BinaryFile(File())
 
     def test_openfile_not_seekable(self):
         """Test BinaryFile with non-seekable file fails."""
@@ -240,7 +240,7 @@ class TestBinaryFile:
                 return File()
 
         with pytest.raises(ValueError):
-            BinaryFile(File)
+            BinaryFile(File())
 
     def test_invalid_object(self):
         """Test BinaryFile with invalid file object fails."""
@@ -250,12 +250,190 @@ class TestBinaryFile:
             pass
 
         with pytest.raises(TypeError):
-            BinaryFile(File)
+            BinaryFile(File())
 
     def test_invalid_mode(self):
         """Test BinaryFile with invalid mode fails."""
         with pytest.raises(ValueError):
             BinaryFile(self.filename, mode='ab')
+
+    def test_memmap_disabled(self):
+        """Test memmap=False (default) does not memory-map file."""
+        with BinaryFile(self.filename) as fh:
+            assert fh._mm is None
+        with BinaryFile(self.filename, memmap=False) as fh:
+            assert fh._mm is None
+
+    def test_memmap_bytesio_ignored(self):
+        """Test memmap=True is silently ignored for BytesIO."""
+        with open(self.filename, 'rb') as f:
+            data = f.read()
+        with BinaryFile(io.BytesIO(data), memmap=True) as fh:
+            assert fh._mm is None
+            assert bytes(fh._read_at(0, 4)) == b'\x00\x01\x02\x03'
+
+    @pytest.mark.parametrize('memmap', [False, True])
+    def test_read_at(self, memmap):
+        """Test _read_at returns bytes or memoryview at offset."""
+        with BinaryFile(self.filename, memmap=memmap) as fh:
+            data = fh._read_at(0, 4)
+            assert isinstance(data, memoryview if memmap else bytes)
+            assert bytes(data) == b'\x00\x01\x02\x03'
+            data = fh._read_at(10, 3)
+            assert bytes(data) == b'\x0a\x0b\x0c'
+
+    @pytest.mark.parametrize('memmap', [False, True])
+    def test_read_array(self, memmap):
+        """Test _read_array returns array at offset; dtype, count=-1, copy."""
+        dtype = numpy.dtype('uint8')
+        with BinaryFile(self.filename, memmap=memmap) as fh:
+            arr = fh._read_array(0, 4, dtype)
+            assert arr.dtype == dtype
+            assert numpy.array_equal(arr, [0, 1, 2, 3])
+            arr = fh._read_array(10, 3, dtype)
+            assert numpy.array_equal(arr, [10, 11, 12])
+            if memmap:
+                assert not arr.flags.writeable
+                arr_copy = fh._read_array(0, 4, dtype, copy=True)
+                assert arr_copy.flags.writeable
+                arr_copy[0] = 99  # must not raise
+            else:
+                # multi-byte dtype: binary.bin bytes as uint16 LE pairs
+                arr16 = fh._read_array(0, 4, numpy.dtype('<u2'))
+                assert numpy.array_equal(
+                    arr16, [0x0100, 0x0302, 0x0504, 0x0706]
+                )
+            # count=-1 reads to end of file
+            arr_end = fh._read_array(252, -1, dtype)
+            assert numpy.array_equal(arr_end, [252, 253, 254, 255])
+
+    def test_read_array_writable_memmap(self, tmp_path):
+        """Test  writable=False makes mmap RO; writable=True keeps it RW."""
+        tmpfile = tmp_path / 'test.bin'
+        with open(self.filename, 'rb') as src:
+            tmpfile.write_bytes(src.read())
+        dtype = numpy.dtype('uint8')
+        with BinaryFile(tmpfile, mode='r+', memmap=True) as fh:
+            arr_ro = fh._read_array(0, 4, dtype)
+            assert not arr_ro.flags.writeable
+            arr_rw = fh._read_array(0, 4, dtype, writable=True)
+            assert arr_rw.flags.writeable
+
+    def test_read_array_truncate(self, caplog):
+        """Test truncate=False raises; True returns partial; None logs."""
+        import logging
+
+        with (
+            BinaryFile(io.BytesIO(bytes(range(5)))) as fh,
+            pytest.raises(ValueError, match='expected 10 items, got 5'),
+        ):
+            fh._read_array(0, 10, numpy.uint8, truncate=False)
+        with BinaryFile(io.BytesIO(bytes(range(5)))) as fh:
+            arr = fh._read_array(0, 10, numpy.uint8, truncate=True)
+            assert len(arr) == 5
+            assert numpy.array_equal(arr, [0, 1, 2, 3, 4])
+        logger = BinaryFile.__module__.split('.')[0]
+        with (
+            BinaryFile(io.BytesIO(bytes(range(5)))) as fh,
+            caplog.at_level(logging.ERROR, logger=logger),
+        ):
+            arr = fh._read_array(0, 10, numpy.uint8, truncate=None)
+        assert len(arr) == 5
+        assert 'expected 10 items, got 5' in caplog.text
+
+    def test_read_array_mmap_alignment(self, tmp_path):
+        """Test mmap path truncates partial element to full boundary."""
+        # 7 bytes; requesting 4 uint16 (8 bytes); 3 complete elements fit
+        tmpfile = tmp_path / 'align.bin'
+        tmpfile.write_bytes(b'\x01\x00\x02\x00\x03\x00\xff')
+        dtype = numpy.dtype('<u2')
+        with BinaryFile(tmpfile, memmap=True) as fh:
+            arr = fh._read_array(0, 4, dtype, truncate=True)
+            assert len(arr) == 3
+            assert numpy.array_equal(arr, [1, 2, 3])
+            # truncate=False must raise even on mmap path
+            with pytest.raises(ValueError, match='expected 4 items, got 3'):
+                fh._read_array(0, 4, dtype, truncate=False)
+
+    def test_read_array_invalid_offset(self):
+        """Test _read_array raises ValueError for negative offset."""
+        with BinaryFile(io.BytesIO(bytes(range(8)))) as fh:  # noqa: SIM117
+            with pytest.raises(ValueError, match='offset'):
+                fh._read_array(-1, 4, numpy.uint8)
+
+    def test_read_array_invalid_count(self):
+        """Test _read_array raises ValueError for count < -1."""
+        with BinaryFile(io.BytesIO(bytes(range(8)))) as fh:  # noqa: SIM117
+            with pytest.raises(ValueError, match='count'):
+                fh._read_array(0, -2, numpy.uint8)
+
+    def test_write_at(self):
+        """Test _write_at writes bytes to file at given offset."""
+        with open(self.filename, 'rb') as fh:
+            data = fh.read()
+        file = io.BytesIO(data)
+        with BinaryFile(file, mode='r+') as fh:
+            fh._write_at(5, b'\xaa\xbb\xcc')
+            assert bytes(fh._read_at(4, 5)) == b'\x04\xaa\xbb\xcc\x08'
+        # verify persistence after close
+        assert file.getvalue()[5:8] == b'\xaa\xbb\xcc'
+
+    def test_write_at_memmap(self, tmp_path):
+        """Test _write_at writes via mmap; mode='r+' creates writable mmap."""
+        tmpfile = tmp_path / 'test.bin'
+        tmpfile.write_bytes(pathlib.Path(self.filename).read_bytes())
+        with BinaryFile(tmpfile, mode='r+', memmap=True) as fh:
+            assert fh._mm is not None
+            assert fh.writable
+            assert bytes(fh._read_at(0, 4)) == b'\x00\x01\x02\x03'
+            fh._write_at(5, b'\xaa\xbb\xcc')
+        with BinaryFile(tmpfile) as fh:
+            assert bytes(fh._read_at(5, 3)) == b'\xaa\xbb\xcc'
+
+    def test_memmapped(self):
+        """Test memmapped property reflects memory-map state."""
+        with BinaryFile(self.filename) as fh:
+            assert not fh.memmapped
+        with BinaryFile(self.filename, memmap=True) as fh:
+            assert fh.memmapped
+
+    def test_writable(self, tmp_path):
+        """Test writable property reflects file open mode."""
+        tmpfile = tmp_path / 'test.bin'
+        tmpfile.write_bytes(b'\x00' * 4)
+        with BinaryFile(tmpfile) as fh:
+            assert not fh.writable
+        with BinaryFile(tmpfile, mode='r+') as fh:
+            assert fh.writable
+
+    def test_name_setter(self):
+        """Test name setter updates display name and attrs."""
+        with BinaryFile(self.filename) as fh:
+            fh.name = 'custom'
+            assert fh.name == 'custom'
+            assert fh.attrs['name'] == 'custom'
+
+    def test_set_lock(self):
+        """Test set_lock enables and disables RLock; no-op when mmap active."""
+        import threading
+
+        with BinaryFile(self.filename) as fh:
+            assert isinstance(fh._lock, contextlib.nullcontext)
+            fh.set_lock(True)
+            assert isinstance(fh._lock, type(threading.RLock()))
+            fh.set_lock(False)
+            assert isinstance(fh._lock, contextlib.nullcontext)
+        with BinaryFile(self.filename, memmap=True) as fh:
+            lock_before = fh._lock
+            fh.set_lock(True)
+            assert fh._lock is lock_before
+
+    def test_repr(self):
+        """Test __repr__ includes class name and file name."""
+        with BinaryFile(self.filename) as fh:
+            r = repr(fh)
+            assert r.startswith('<BinaryFile ')
+            assert 'binary.bin' in r
 
 
 class TestCziFile:
@@ -328,335 +506,45 @@ class TestCziFile:
         except OSError as exc:
             pytest.skip(f'HTTP server not available: {exc}')
 
-
-def test_not_czi():
-    """Test open non-CZI file raises exceptions."""
-    with pytest.raises(CziFileError):
-        imread(DATA / 'empty.bin')
-    with pytest.raises(TypeError):
-        imread(ValueError)
-
-
-def test_imread():
-    """Smoke test for imread covering all parameters."""
-    filename = DATA / 'Test.czi'
-    if not filename.exists():
-        pytest.skip(f'{filename!r} not found')
-
-    # str path, default parameters
-    im = imread(str(filename))
-    assert isinstance(im, numpy.ndarray)
-    assert im.shape == (3, 22, 181, 312)
-    assert im.dtype == numpy.uint16
-
-    # pathlib.Path
-    im = imread(filename)
-    assert im.shape == (3, 22, 181, 312)
-
-    # IO[bytes] (open file object)
-    with open(filename, 'rb') as fh:
-        im = imread(fh)
-    assert im.shape == (3, 22, 181, 312)
-
-    # squeeze=False preserves length-1 dimensions
-    im = imread(filename, squeeze=False)
-    assert im.shape == (1, 3, 22, 181, 312, 1)
-
-    # scene=None merges all scenes (Test.czi has one scene)
-    im = imread(filename, scene=None)
-    assert im.shape == (3, 22, 181, 312)
-
-    # roi=(x, y, width, height) restricts spatial extent
-    im = imread(filename, roi=(10, 20, 80, 40))
-    assert im.shape == (3, 22, 40, 80)
-
-    # pixeltype converts output pixel type
-    im = imread(filename, pixeltype=CziPixelType.GRAY8)
-    assert im.dtype == numpy.uint8
-    assert im.shape == (3, 22, 181, 312)
-
-    # fillvalue sets pixels not covered by any subblock
-    im = imread(filename, fillvalue=255)
-    assert im.shape == (3, 22, 181, 312)
-
-    # maxworkers=1 forces single-threaded decode
-    im = imread(filename, maxworkers=1)
-    assert im.shape == (3, 22, 181, 312)
-
-    # asxarray=True returns an xarray DataArray
-    try:
-        import xarray
-    except ImportError:
-        pass
-    else:
-        xa = imread(filename, asxarray=True)
-        assert isinstance(xa, xarray.DataArray)
-        assert xa.shape == (3, 22, 181, 312)
-
-    # out='memmap' writes into a temporary memory-mapped file
-    im = imread(filename, out='memmap')
-    assert isinstance(im, numpy.ndarray)
-    assert im.shape == (3, 22, 181, 312)
-    del im  # close memmap
-
-    # out=ndarray: data is written into the caller's buffer without copying
-    out = numpy.zeros((3, 22, 181, 312), numpy.uint16)
-    im = imread(filename, out=out)
-    assert numpy.shares_memory(im, out)
-    assert im.flags.c_contiguous
-    assert out.sum() > 0
-
-    # out=ndarray with reordering selection: contiguous, no copy
-    with CziFile(filename) as czi:
-        sub = czi.scenes[0](Z=None, C=None)
-        out2 = numpy.zeros(sub.shape, sub.dtype)
-        im2 = sub.asarray(out=out2)
-        assert numpy.shares_memory(im2, out2)
-        assert im2.flags.c_contiguous
-        assert im2.shape == sub.shape
-
-    # **selection: select a single channel and z-plane
-    im = imread(filename, C=0, Z=0)
-    assert im.shape == (181, 312)
-
-
-def test_imread_scene_default():
-    """Test imread reads first scene by default."""
-    # PupalWing.czi has a single scene at S=4 (not S=0).
-
-    filename = DATA / 'Private-PhasorPy' / 'PupalWing.czi'
-    if not filename.exists():
-        pytest.skip(f'{filename!r} not found')
-
-    with CziFile(filename) as czi:
-        assert list(czi.scenes.keys()) == [4]
-
-    im = imread(filename)
-    assert im.shape == (80, 520, 692)
-    assert im.dtype == numpy.uint16
-
-    with pytest.raises(KeyError, match='scene 0 not found'):
-        imread(filename, scene=0)
-
-    with pytest.raises(KeyError, match='scene -1 not found'):
-        imread(filename, scene=-1)
-
-    # slice(4, 5) selects S-coords in {4} -> same result as scene=4
-    im_slice = imread(filename, scene=slice(4, 5))
-    assert numpy.array_equal(im_slice, im)
-
-    # slice(4, 10) covers S in {4..9} -> S=4 is included; same result
-    im_wide = imread(filename, scene=slice(4, 10))
-    assert numpy.array_equal(im_wide, im)
-
-    # slice(0, 4) covers S in {0,1,2,3} -> file has no such scene
-    with pytest.raises(KeyError):
-        imread(filename, scene=slice(0, 4))
-
-
-def test_imread_scene_sequence():
-    """Test imread and CziFile.asarray accept a sequence of scene indices."""
-    filename = DATA / 'Zenodo-7015307/S=3_1Pos_2Mosaic_T=2=Z=3_CH=2.czi'
-    if not filename.exists():
-        pytest.skip(f'{filename!r} not found')
-
-    with CziFile(filename) as czi:
-        # single-item sequence is equivalent to scalar scene selection
-        im_list1 = czi.asarray(scene=[1])
-        im_scalar1 = czi.asarray(scene=1)
-        assert im_list1.shape == im_scalar1.shape
-        assert numpy.array_equal(im_list1, im_scalar1)
-
-        # two-scene sequence merges scenes 0 and 1 into one bounding box
-        im_01 = czi.asarray(scene=[0, 1])
-        assert im_01.shape == (2, 2, 3, 1109, 1760)
-
-        # result equals what czi.scenes(scene=[0, 1]) returns
-        ref_01 = czi.scenes(scene=[0, 1]).asarray()
-        assert numpy.array_equal(im_01, ref_01)
-
-    # also reachable via imread()
-    im_imread = imread(filename, scene=[0, 1])
-    assert numpy.array_equal(im_imread, im_01)
-
-
-def test_directory_entry_dimension_entries():
-    """Test CziDirectoryEntryDV.read_dimension_entries returns all dims."""
-    filename = DATA / 'Test.czi'
-    if not filename.exists():
-        pytest.skip(f'{filename!r} not found')
-
-    with CziFile(filename) as czi:
-        de = czi.subblock_directory[0]
-        dim_entries = de.read_dimension_entries(czi.filehandle)
-
-        assert isinstance(dim_entries, dict)
-        assert all(isinstance(k, CziDimensionType) for k in dim_entries)
-        assert all(
-            isinstance(v, CziDimensionEntryDV1) for v in dim_entries.values()
-        )
-        assert len(dim_entries) == de.dimensions_count
-
-        # start and size match values parsed by constructor
-        for dim_char in ('T', 'C', 'Z', 'Y', 'X'):
-            dt = CziDimensionType(dim_char)
-            assert dt in dim_entries
-            idx = de.dims.index(dim_char)
-            assert dim_entries[dt].start == de.start[idx]
-            assert dim_entries[dt].size == de.shape[idx]
-
-        # Test.czi has no mosaic or scene dims in directory entries
-        assert CziDimensionType.MOSAIC not in dim_entries
-        assert CziDimensionType.SCENE not in dim_entries
-
-
-def test_directory_entry_dimension_entries_mosaic():
-    """Test read_dimension_entries includes M and S dims for mosaic tiles."""
-    filename = DATA / 'Zenodo-7015307/S=3_1Pos_2Mosaic_T=2=Z=3_CH=2.czi'
-    if not filename.exists():
-        pytest.skip(f'{filename!r} not found')
-
-    with CziFile(filename) as czi:
-        de_mosaic = next(
-            (d for d in czi.subblock_directory if d.mosaic_index >= 0), None
-        )
-        if de_mosaic is None:
-            pytest.skip('no mosaic entry found')
-
-        dim_entries = de_mosaic.read_dimension_entries(czi.filehandle)
-
-        assert CziDimensionType.MOSAIC in dim_entries
-        m = dim_entries[CziDimensionType.MOSAIC]
-        assert m.start == de_mosaic.mosaic_index
-        assert CziDimensionType.SCENE in dim_entries
-        s = dim_entries[CziDimensionType.SCENE]
-        assert s.start == de_mosaic.scene_index
-
-
-def test_subblock_directory_file_positions():
-    """Test CziSubBlockDirectorySegmentData.file_positions matches entries."""
-    filename = DATA / 'Test.czi'
-    if not filename.exists():
-        pytest.skip(f'{filename!r} not found')
-
-    with CziFile(filename) as czi:
-        fh = czi.filehandle
-        fh.seek(czi.header.directory_position + 32)
-        positions = CziSubBlockDirectorySegmentData.file_positions(fh)
-
-        assert isinstance(positions, tuple)
-        assert all(isinstance(p, int) for p in positions)
-        assert len(positions) == len(czi.subblock_directory)
-        assert positions == tuple(
-            e.file_position for e in czi.subblock_directory
-        )
-
-
-def test_attachment_directory_file_positions():
-    """Test CziAttachmentDirectorySegmentData.file_positions."""
-    filename = DATA / 'Test.czi'
-    if not filename.exists():
-        pytest.skip(f'{filename!r} not found')
-    with CziFile(filename) as czi:
-        if not czi.header.attachment_directory_position:
-            pytest.skip('no attachment directory')
-
-        fh = czi.filehandle
-        fh.seek(czi.header.attachment_directory_position + 32)
-        positions = CziAttachmentDirectorySegmentData.file_positions(fh)
-
-        assert isinstance(positions, tuple)
-        assert all(isinstance(p, int) for p in positions)
-        assert len(positions) == len(czi.attachment_directory)
-        assert positions == tuple(
-            e.file_position for e in czi.attachment_directory
-        )
-
-        # name_offset points to the 80 byte name field in the A1 record
-        for entry in czi.attachment_directory:
-            assert entry.name_offset == entry.offset + 48
-            fh.seek(entry.name_offset)
-            raw_name = fh.read(80).rstrip(b'\x00').decode()
-            assert raw_name == entry.name
-
-
-@pytest.mark.parametrize(
-    ('filename', 'expected_name', 'expected_part'),
-    [
-        ('foo.czi', 'foo.czi', 0),
-        ('foo.CZI', 'foo.czi', 0),  # extension is normalised to lowercase
-        ('foo(1).czi', 'foo.czi', 1),
-        ('foo(42).czi', 'foo.czi', 42),
-        ('path/to/foo.czi', 'path/to/foo.czi', 0),
-        ('path/to/foo(3).czi', 'path/to/foo.czi', 3),
-    ],
-)
-def test_match_filename(filename, expected_name, expected_part):
-    """Test match_filename parses CZI file name and part number."""
-    name, part = match_filename(filename)
-    assert name == expected_name
-    assert part == expected_part
-
-
-def test_match_filename_invalid():
-    """Test match_filename raises ValueError for non-CZI file names."""
-    with pytest.raises(ValueError, match='not a CZI'):
-        match_filename('foo.tif')
-
-
-def test_update_pending():
-    """Test update_pending flag management in CziFile context manager."""
-    filename = DATA / 'Test.czi'
-    if not filename.exists():
-        pytest.skip(f'{filename!r} not found')
-
-    buf = io.BytesIO(filename.read_bytes())
-
-    # flag is set True on __enter__ for a writable filehandle
-    czi = CziFile(buf)
-    offset = czi.header.segment.data_offset + 68
-    assert not czi.header.update_pending
-    czi.__enter__()
-    try:
-        assert czi.header.update_pending
-        buf.seek(offset)
-        assert struct.unpack('<i', buf.read(4))[0] == 1
-    finally:
-        czi.__exit__(None, None, None)
-        czi.close()
-
-    # flag is cleared False on clean __exit__
-    buf = io.BytesIO(filename.read_bytes())
-    with CziFile(buf) as czi:
-        offset = czi.header.segment.data_offset + 68
-        assert czi.header.update_pending
-    assert not czi.header.update_pending
-    buf.seek(offset)
-    assert struct.unpack('<i', buf.read(4))[0] == 0
-
-    # flag stays True when context exits via exception
-    buf = io.BytesIO(filename.read_bytes())
-    offset = None
-    with contextlib.suppress(RuntimeError), CziFile(buf) as czi:
-        offset = czi.header.segment.data_offset + 68
-        raise RuntimeError
-    assert offset is not None
-    buf.seek(offset)
-    assert struct.unpack('<i', buf.read(4))[0] == 1
-
-    # flag is not written for a read-only file stream
-    with open(filename, 'rb') as f, CziFile(f) as czi:
-        assert not czi.header.update_pending
-    assert not czi.header.update_pending
-
-
-def test_czi():
+    def test_memmap(self):
+        """Test CziFile with memmap=True reads same data as without."""
+        with CziFile(self.filename) as czi:
+            ref = czi.scenes[0].asarray()
+        with CziFile(self.filename, memmap=True) as czi:
+            assert czi._mm is not None
+            data = czi.scenes[0].asarray()
+        assert numpy.array_equal(data, ref)
+
+    def test_memmap_bytesio_ignored(self):
+        """Test CziFile memmap=True is silently ignored for BytesIO."""
+        with open(self.filename, 'rb') as fh:
+            bio = io.BytesIO(fh.read())
+        with CziFile(bio, memmap=True) as czi:
+            assert czi._mm is None
+            self.validate(czi, name='BytesIO')
+
+    def test_memmap_writable(self, tmp_path):
+        """Test CziFile with mode='r+' and memmap=True reads correct data."""
+        import shutil
+
+        tmpfile = tmp_path / 'Test.czi'
+        shutil.copy2(self.filename, tmpfile)
+        with CziFile(self.filename) as czi:
+            ref = czi.scenes[0].asarray()
+        with CziFile(tmpfile, mode='r+', memmap=True) as czi:
+            assert czi._mm is not None
+            data = czi.scenes[0].asarray()
+        assert numpy.array_equal(data, ref)
+
+
+@pytest.mark.parametrize('memmap', [False, True])
+def test_czi(memmap):
     """Test all implemented public interfaces of CziFile using Test.czi."""
     filename = DATA / 'Test.czi'
     if not filename.exists():
         pytest.skip(f'{filename!r} not found')
 
-    with CziFile(filename) as czi:
+    with CziFile(filename, memmap=memmap) as czi:
         # BinaryFile base attributes
         assert not czi.closed
         assert not czi.filehandle.closed
@@ -673,14 +561,17 @@ def test_czi():
         assert repr(czi).startswith("<CziFile 'Test.czi'")
         assert 'CziFile' in str(czi)
 
-        # set_lock
-        assert isinstance(czi.lock, NullLock)
+        # set_lock is a no-op when memmap is active (lock-free I/O)
+        assert isinstance(czi.lock, contextlib.nullcontext)
         czi.set_lock(True)
-        assert hasattr(czi.lock, 'acquire')
-        assert hasattr(czi.lock, 'release')
-        assert not isinstance(czi.lock, NullLock)
+        if memmap:
+            assert isinstance(czi.lock, contextlib.nullcontext)
+        else:
+            assert hasattr(czi.lock, 'acquire')
+            assert hasattr(czi.lock, 'release')
+            assert not isinstance(czi.lock, contextlib.nullcontext)
         czi.set_lock(False)
-        assert isinstance(czi.lock, NullLock)
+        assert isinstance(czi.lock, contextlib.nullcontext)
 
         # header
         hdr = czi.header
@@ -917,13 +808,411 @@ def test_czi():
     assert czi.closed
 
 
-def test_attachments_slide_scanner():
+def test_not_czi():
+    """Test open non-CZI file raises exceptions."""
+    with pytest.raises(CziFileError):
+        imread(DATA / 'empty.bin')
+    with pytest.raises(TypeError):
+        imread(ValueError)
+
+
+def test_imread():
+    """Smoke test for imread covering all parameters."""
+    filename = DATA / 'Test.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    # str path, default parameters
+    im = imread(str(filename))
+    assert isinstance(im, numpy.ndarray)
+    assert im.shape == (3, 22, 181, 312)
+    assert im.dtype == numpy.uint16
+
+    # pathlib.Path
+    im = imread(filename)
+    assert im.shape == (3, 22, 181, 312)
+
+    # IO[bytes] (open file object)
+    with open(filename, 'rb') as fh:
+        im = imread(fh)
+    assert im.shape == (3, 22, 181, 312)
+
+    # squeeze=False preserves length-1 dimensions
+    im = imread(filename, squeeze=False)
+    assert im.shape == (1, 3, 22, 181, 312, 1)
+
+    # scene=None merges all scenes (Test.czi has one scene)
+    im = imread(filename, scene=None)
+    assert im.shape == (3, 22, 181, 312)
+
+    # roi=(x, y, width, height) restricts spatial extent
+    im = imread(filename, roi=(10, 20, 80, 40))
+    assert im.shape == (3, 22, 40, 80)
+
+    # pixeltype converts output pixel type
+    im = imread(filename, pixeltype=CziPixelType.GRAY8)
+    assert im.dtype == numpy.uint8
+    assert im.shape == (3, 22, 181, 312)
+
+    # fillvalue sets pixels not covered by any subblock
+    im = imread(filename, fillvalue=255)
+    assert im.shape == (3, 22, 181, 312)
+
+    # maxworkers=1 forces single-threaded decode
+    im = imread(filename, maxworkers=1)
+    assert im.shape == (3, 22, 181, 312)
+
+    # asxarray=True returns an xarray DataArray
+    try:
+        import xarray
+    except ImportError:
+        pass
+    else:
+        xa = imread(filename, asxarray=True)
+        assert isinstance(xa, xarray.DataArray)
+        assert xa.shape == (3, 22, 181, 312)
+
+    # out='memmap' writes into a temporary memory-mapped file
+    im = imread(filename, out='memmap')
+    assert isinstance(im, numpy.ndarray)
+    assert im.shape == (3, 22, 181, 312)
+    del im  # close memmap
+
+    # out=ndarray: data is written into the caller's buffer without copying
+    out = numpy.zeros((3, 22, 181, 312), numpy.uint16)
+    im = imread(filename, memmap=True, out=out)
+    assert numpy.shares_memory(im, out)
+    assert im.flags.c_contiguous
+    assert out.sum() > 0
+
+    # out=ndarray with reordering selection: contiguous, no copy
+    with CziFile(filename) as czi:
+        sub = czi.scenes[0](Z=None, C=None)
+        out2 = numpy.zeros(sub.shape, sub.dtype)
+        im2 = sub.asarray(out=out2)
+        assert numpy.shares_memory(im2, out2)
+        assert im2.flags.c_contiguous
+        assert im2.shape == sub.shape
+
+    # **selection: select a single channel and z-plane
+    im = imread(filename, C=0, Z=0)
+    assert im.shape == (181, 312)
+
+
+def test_imread_scene_default():
+    """Test imread reads first scene by default."""
+    # PupalWing.czi has a single scene at S=4 (not S=0).
+
+    filename = DATA / 'Private-PhasorPy' / 'PupalWing.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        assert list(czi.scenes.keys()) == [4]
+
+    im = imread(filename)
+    assert im.shape == (80, 520, 692)
+    assert im.dtype == numpy.uint16
+
+    with pytest.raises(KeyError, match='scene 0 not found'):
+        imread(filename, scene=0)
+
+    with pytest.raises(KeyError, match='scene -1 not found'):
+        imread(filename, scene=-1)
+
+    # slice(4, 5) selects S-coords in {4} -> same result as scene=4
+    im_slice = imread(filename, scene=slice(4, 5))
+    assert numpy.array_equal(im_slice, im)
+
+    # slice(4, 10) covers S in {4..9} -> S=4 is included; same result
+    im_wide = imread(filename, scene=slice(4, 10))
+    assert numpy.array_equal(im_wide, im)
+
+    # slice(0, 4) covers S in {0,1,2,3} -> file has no such scene
+    with pytest.raises(KeyError):
+        imread(filename, scene=slice(0, 4))
+
+
+def test_imread_scene_sequence():
+    """Test imread and CziFile.asarray accept a sequence of scene indices."""
+    filename = DATA / 'Zenodo-7015307/S=3_1Pos_2Mosaic_T=2=Z=3_CH=2.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        # single-item sequence is equivalent to scalar scene selection
+        im_list1 = czi.asarray(scene=[1])
+        im_scalar1 = czi.asarray(scene=1)
+        assert im_list1.shape == im_scalar1.shape
+        assert numpy.array_equal(im_list1, im_scalar1)
+
+        # two-scene sequence merges scenes 0 and 1 into one bounding box
+        im_01 = czi.asarray(scene=[0, 1])
+        assert im_01.shape == (2, 2, 3, 1109, 1760)
+
+        # result equals what czi.scenes(scene=[0, 1]) returns
+        ref_01 = czi.scenes(scene=[0, 1]).asarray()
+        assert numpy.array_equal(im_01, ref_01)
+
+    # also reachable via imread()
+    im_imread = imread(filename, scene=[0, 1])
+    assert numpy.array_equal(im_imread, im_01)
+
+
+def test_directory_entry_dimension_entries():
+    """Test CziDirectoryEntryDV.read_dimension_entries returns all dims."""
+    filename = DATA / 'Test.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        de = czi.subblock_directory[0]
+        dim_entries = de.read_dimension_entries(czi)
+
+        assert isinstance(dim_entries, dict)
+        assert all(isinstance(k, CziDimensionType) for k in dim_entries)
+        assert all(
+            isinstance(v, CziDimensionEntryDV1) for v in dim_entries.values()
+        )
+        assert len(dim_entries) == de.dimensions_count
+
+        # start and size match values parsed by constructor
+        for dim_char in ('T', 'C', 'Z', 'Y', 'X'):
+            dt = CziDimensionType(dim_char)
+            assert dt in dim_entries
+            idx = de.dims.index(dim_char)
+            assert dim_entries[dt].start == de.start[idx]
+            assert dim_entries[dt].size == de.shape[idx]
+
+        # Test.czi has no mosaic or scene dims in directory entries
+        assert CziDimensionType.MOSAIC not in dim_entries
+        assert CziDimensionType.SCENE not in dim_entries
+
+
+def test_directory_entry_dimension_entries_mosaic():
+    """Test read_dimension_entries includes M and S dims for mosaic tiles."""
+    filename = DATA / 'Zenodo-7015307/S=3_1Pos_2Mosaic_T=2=Z=3_CH=2.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        de_mosaic = next(
+            (d for d in czi.subblock_directory if d.mosaic_index >= 0), None
+        )
+        if de_mosaic is None:
+            pytest.skip('no mosaic entry found')
+
+        dim_entries = de_mosaic.read_dimension_entries(czi)
+
+        assert CziDimensionType.MOSAIC in dim_entries
+        m = dim_entries[CziDimensionType.MOSAIC]
+        assert m.start == de_mosaic.mosaic_index
+        assert CziDimensionType.SCENE in dim_entries
+        s = dim_entries[CziDimensionType.SCENE]
+        assert s.start == de_mosaic.scene_index
+
+
+def test_subblock_directory_file_positions():
+    """Test CziSubBlockDirectorySegmentData.file_positions matches entries."""
+    filename = DATA / 'Test.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        fh = czi.filehandle
+        fh.seek(czi.header.directory_position + 32)
+        positions = CziSubBlockDirectorySegmentData.file_positions(fh)
+
+        assert isinstance(positions, tuple)
+        assert all(isinstance(p, int) for p in positions)
+        assert len(positions) == len(czi.subblock_directory)
+        assert positions == tuple(
+            e.file_position for e in czi.subblock_directory
+        )
+
+
+def test_attachment_directory_file_positions():
+    """Test CziAttachmentDirectorySegmentData.file_positions."""
+    filename = DATA / 'Test.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+    with CziFile(filename) as czi:
+        if not czi.header.attachment_directory_position:
+            pytest.skip('no attachment directory')
+
+        fh = czi.filehandle
+        fh.seek(czi.header.attachment_directory_position + 32)
+        positions = CziAttachmentDirectorySegmentData.file_positions(fh)
+
+        assert isinstance(positions, tuple)
+        assert all(isinstance(p, int) for p in positions)
+        assert len(positions) == len(czi.attachment_directory)
+        assert positions == tuple(
+            e.file_position for e in czi.attachment_directory
+        )
+
+        # name_offset points to the 80 byte name field in the A1 record
+        for entry in czi.attachment_directory:
+            assert entry.name_offset == entry.offset + 48
+            fh.seek(entry.name_offset)
+            raw_name = fh.read(80).rstrip(b'\x00').decode()
+            assert raw_name == entry.name
+
+
+def test_subblock_data_copy():
+    """Test CziSubBlockSegmentData.data() ownership semantics with copy."""
+    filename = DATA / 'Test.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename, memmap=True) as czi:
+        sb = next(iter(czi.subblocks()))
+        compression = CziCompressionType.UNCOMPRESSED
+        assert sb.directory_entry.compression == compression
+
+        # default (copy=True): always returns owned memory, safe after close
+        tile = sb.data()
+        assert tile.flags.owndata
+
+        # copy=False: mmap-backed uncompressed tile is a borrowed view
+        tile_view = sb.data(copy=False)
+        assert not tile_view.flags.owndata
+        assert numpy.array_equal(tile, tile_view)
+
+    # tile must remain readable after the file is closed
+    _ = tile.sum()
+
+    # memmap=False: copy=False has no effect, data is already owned
+    with CziFile(filename, memmap=False) as czi:
+        sb = next(iter(czi.subblocks()))
+        tile_no_mmap = sb.data()
+        tile_no_copy = sb.data(copy=False)
+        assert numpy.array_equal(tile_no_mmap, tile_no_copy)
+
+
+def test_subblock_metadata_parallel():
+    """Test parallel reading of subblock metadata using ThreadPoolExecutor."""
+    filename = DATA / 'Test.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    # reference: sequential reads
+    with CziFile(filename) as czi:
+        ref = [sb.metadata() for sb in czi.subblocks()]
+
+    for memmap in (False, True):
+        with CziFile(filename, memmap=memmap) as czi:
+            if not memmap:
+                czi.set_lock(True)
+            subblocks = list(czi.subblocks())
+            with ThreadPoolExecutor() as executor:
+                results = list(
+                    executor.map(lambda sb: sb.metadata(), subblocks)
+                )
+        assert results == ref
+
+
+def test_asarray_parallel_memmap():
+    """Test asarray with maxworkers > 1 and memmap=True."""
+    # ExampleZstd.czi scene 1 has 12 non-overlapping tiles (one per T/C/Z),
+    # shape (T=2, C=2, Z=3, Y=256, X=256). Because tiles do not overlap,
+    # parallel compositing is deterministic and must match sequential output
+    # exactly for both memmap=True and memmap=False.
+    filename = DATA / 'ExampleZstd.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        ref = czi.scenes[1].asarray(maxworkers=1)
+
+    with CziFile(filename, memmap=True) as czi:
+        assert czi._mm is not None
+        arr = czi.scenes[1].asarray(maxworkers=1)
+    assert numpy.array_equal(arr, ref)
+
+    with CziFile(filename, memmap=True) as czi:
+        arr_parallel = czi.scenes[1].asarray(maxworkers=8)
+    assert numpy.array_equal(arr_parallel, ref)
+
+
+@pytest.mark.parametrize(
+    ('filename', 'expected_name', 'expected_part'),
+    [
+        ('foo.czi', 'foo.czi', 0),
+        ('foo.CZI', 'foo.czi', 0),  # extension is normalised to lowercase
+        ('foo(1).czi', 'foo.czi', 1),
+        ('foo(42).czi', 'foo.czi', 42),
+        ('path/to/foo.czi', 'path/to/foo.czi', 0),
+        ('path/to/foo(3).czi', 'path/to/foo.czi', 3),
+    ],
+)
+def test_match_filename(filename, expected_name, expected_part):
+    """Test match_filename parses CZI file name and part number."""
+    name, part = match_filename(filename)
+    assert name == expected_name
+    assert part == expected_part
+
+
+def test_match_filename_invalid():
+    """Test match_filename raises ValueError for non-CZI file names."""
+    with pytest.raises(ValueError, match='not a CZI'):
+        match_filename('foo.tif')
+
+
+def test_update_pending():
+    """Test update_pending flag management in CziFile context manager."""
+    filename = DATA / 'Test.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    buf = io.BytesIO(filename.read_bytes())
+
+    # flag is set True on __enter__ for a writable filehandle
+    czi = CziFile(buf)
+    offset = czi.header.segment.data_offset + 68
+    assert not czi.header.update_pending
+    czi.__enter__()
+    try:
+        assert czi.header.update_pending
+        buf.seek(offset)
+        assert struct.unpack('<i', buf.read(4))[0] == 1
+    finally:
+        czi.__exit__(None, None, None)
+        czi.close()
+
+    # flag is cleared False on clean __exit__
+    buf = io.BytesIO(filename.read_bytes())
+    with CziFile(buf) as czi:
+        offset = czi.header.segment.data_offset + 68
+        assert czi.header.update_pending
+    assert not czi.header.update_pending
+    buf.seek(offset)
+    assert struct.unpack('<i', buf.read(4))[0] == 0
+
+    # flag stays True when context exits via exception
+    buf = io.BytesIO(filename.read_bytes())
+    offset = None
+    with contextlib.suppress(RuntimeError), CziFile(buf) as czi:
+        offset = czi.header.segment.data_offset + 68
+        raise RuntimeError
+    assert offset is not None
+    buf.seek(offset)
+    assert struct.unpack('<i', buf.read(4))[0] == 1
+
+    # flag is not written for a read-only file stream
+    with open(filename, 'rb') as f, CziFile(f) as czi:
+        assert not czi.header.update_pending
+    assert not czi.header.update_pending
+
+
+@pytest.mark.parametrize('memmap', [False, True])
+def test_attachments_slide_scanner(memmap):
     """Test attachments in a slide-scanner CZI (Zeiss-5-Uncompressed)."""
     filename = DATA / 'OpenSlide/Zeiss-5-Uncompressed.czi'
     if not filename.exists():
         pytest.skip(f'{filename!r} not found')
 
-    with CziFile(filename) as czi:
+    with CziFile(filename, memmap=memmap) as czi:
         attachments = {a.attachment_entry.name: a for a in czi.attachments()}
         assert set(attachments) == {
             'EventList',
@@ -978,14 +1267,18 @@ def test_attachments_slide_scanner():
         assert isinstance(prof, bytes)
         assert len(prof) > 0
 
-        # raw=True always returns bytes regardless of content type
+        # raw=True returns bytes or memoryview regardless of content type
         raw = attachments['Thumbnail'].data(raw=True)
         assert isinstance(raw, bytes)
         assert raw[:2] == b'\xff\xd8'  # JPEG SOI marker
 
+        raw = attachments['Thumbnail'].data(raw=True, copy=False)
+        assert isinstance(raw, memoryview if memmap else bytes)
+        assert raw[:2] == b'\xff\xd8'  # JPEG SOI marker
+
         # raw=True on an embedded CZI gives bytes that can be opened as CziFile
-        label_raw = attachments['Label'].data(raw=True)
-        assert isinstance(label_raw, bytes)
+        label_raw = attachments['Label'].data(raw=True, copy=False)
+        assert isinstance(label_raw, memoryview if memmap else bytes)
         assert label_raw[:10] == b'ZISRAWFILE'
         with CziFile(io.BytesIO(label_raw)) as embedded:
             assert len(embedded.scenes) == 1
@@ -1010,6 +1303,30 @@ def test_attachments_slide_scanner():
             fh.seek(entry.name_offset)
             raw_name = fh.read(80).rstrip(b'\x00').decode()
             assert raw_name == entry.name
+
+
+def test_attachments_parallel():
+    """Test parallel reading of all attachment types."""
+    filename = DATA / 'OpenSlide/Zeiss-5-Uncompressed.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    # reference: sequential reads
+    with CziFile(filename) as czi:
+        ref = [a.data() for a in czi.attachments()]
+
+    for memmap in (False, True):
+        with CziFile(filename, memmap=memmap) as czi:
+            if not memmap:
+                czi.set_lock(True)
+            att_list = list(czi.attachments())
+            with ThreadPoolExecutor() as executor:
+                results = list(executor.map(lambda a: a.data(), att_list))
+        for ref_data, result in zip(ref, results, strict=True):
+            if isinstance(ref_data, numpy.ndarray):
+                assert numpy.array_equal(result, ref_data)
+            else:
+                assert result == ref_data
 
 
 def test_attachments_palm():
