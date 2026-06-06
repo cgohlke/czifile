@@ -47,7 +47,7 @@ file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.4.30
+:Version: 2026.6.6
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -69,15 +69,25 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.4 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.4
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.3.6
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.5, 3.15.0b2 64-bit
+- `Numpy <https://pypi.org/project/numpy>`_ 2.4.6
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.6.6
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.4.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.9 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.4.11 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.6.1 (optional)
 
 Revisions
 ---------
+
+2026.6.6
+
+- Refactor segment, directory, and content file parsing (breaking).
+- Add memmap parameter to CziFile/imread for lock-free parallel subblock reads.
+- Add writable property to BinaryFile.
+- Change read_content functions to accept bytes or memoryview.
+- Remove read_array function.
+- Require imagecodecs >= 2026.6.6 for zstd1 codec.
+- Support Python 3.15.
 
 2026.4.30
 
@@ -334,10 +344,10 @@ Low-level access to CZI file segments:
 
 >>> with CziFile('Example.czi') as czi:
 ...     # file header: version, GUIDs, and segment offsets
-...     hdr = czi.header
-...     assert hdr.version == (1, 0)
-...     assert str(hdr.file_guid) == 'f8a61493-053e-c94e-bae0-bc7e96d18997'
-...     assert not hdr.update_pending
+...     header = czi.header
+...     assert header.version == (1, 0)
+...     assert str(header.file_guid) == 'f8a61493-053e-c94e-bae0-bc7e96d18997'
+...     assert not header.update_pending
 ...
 ...     # iterate all subblock segments sequentially via the directory
 ...     for segdata in czi.subblocks():
@@ -385,7 +395,7 @@ View the images and metadata in a CZI file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.4.30'
+__version__ = '2026.6.6'
 
 __all__ = [
     'CONVERT_PIXELTYPE',
@@ -429,15 +439,16 @@ import enum
 import io
 import itertools
 import logging
+import mmap
 import os
 import re
 import struct
 import sys
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import cache, cached_property
-from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, cast, final, overload
 from xml.etree import ElementTree
 
@@ -450,7 +461,6 @@ if TYPE_CHECKING:
         Generator,
         Iterable,
         Iterator,
-        Mapping,
         Sequence,
     )
     from types import TracebackType
@@ -468,7 +478,7 @@ FIRST_SCENE: int = -1010101  # sentinel: select first available scene
 
 @overload
 def imread(
-    files: str | os.PathLike[Any] | IO[bytes],
+    file: str | os.PathLike[Any] | IO[bytes],
     /,
     *,
     scene: SelectionValue = ...,
@@ -478,6 +488,7 @@ def imread(
     storedsize: bool = ...,
     squeeze: bool = ...,
     maxworkers: int | None = ...,
+    memmap: bool = ...,
     asxarray: Literal[False] = ...,
     out: OutputType = ...,
     **selection: SelectionValue,
@@ -486,7 +497,7 @@ def imread(
 
 @overload
 def imread(
-    files: str | os.PathLike[Any] | IO[bytes],
+    file: str | os.PathLike[Any] | IO[bytes],
     /,
     *,
     scene: SelectionValue = ...,
@@ -496,6 +507,7 @@ def imread(
     storedsize: bool = ...,
     squeeze: bool = ...,
     maxworkers: int | None = ...,
+    memmap: bool = ...,
     asxarray: Literal[True],
     out: OutputType = ...,
     **selection: SelectionValue,
@@ -504,7 +516,7 @@ def imread(
 
 @overload
 def imread(
-    files: str | os.PathLike[Any] | IO[bytes],
+    file: str | os.PathLike[Any] | IO[bytes],
     /,
     *,
     scene: SelectionValue = ...,
@@ -514,6 +526,7 @@ def imread(
     storedsize: bool = ...,
     squeeze: bool = ...,
     maxworkers: int | None = ...,
+    memmap: bool = ...,
     asxarray: bool,
     out: OutputType = ...,
     **selection: SelectionValue,
@@ -521,7 +534,7 @@ def imread(
 
 
 def imread(
-    files: str | os.PathLike[Any] | IO[bytes],
+    file: str | os.PathLike[Any] | IO[bytes],
     /,
     *,
     scene: SelectionValue = FIRST_SCENE,
@@ -531,6 +544,7 @@ def imread(
     storedsize: bool = False,
     squeeze: bool = True,
     maxworkers: int | None = None,
+    memmap: bool = False,
     asxarray: bool = False,
     out: OutputType = None,
     **selection: SelectionValue,
@@ -538,7 +552,7 @@ def imread(
     """Return image data from CZI file as numpy array or xarray DataArray.
 
     Parameters:
-        files:
+        file:
             File name or seekable binary stream.
         scene:
             Absolute S-coordinate(s) of scene(s) to read.
@@ -566,6 +580,10 @@ def imread(
         maxworkers:
             Maximum number of threads to decode subblock data.
             By default, up to half the CPU cores are used.
+        memmap:
+            Map file into memory.
+            Ignored if memory mapping is not available or if the stream does
+            not support it.
         asxarray:
             If True, return an xarray DataArray instead of a numpy array.
         out:
@@ -576,7 +594,7 @@ def imread(
             Dimension selections forwarded to :py:meth:`CziImage.__call__`.
 
     """
-    with CziFile(files, squeeze=squeeze) as czi:
+    with CziFile(file, squeeze=squeeze, memmap=memmap) as czi:
         if asxarray:
             return czi.asxarray(
                 scene=scene,
@@ -610,6 +628,16 @@ class BinaryFile:
             File open mode if ``file`` is a file name.
             If not specified, defaults to ``'r'``. Files are always opened
             in binary mode.
+        memmap:
+            Map file into memory.
+            Ignored if memory mapping is not available or if the stream does
+            not support it.
+
+    Notes:
+        Memory mapping can improve random-access read performance on large
+        files or repeated reads of the same file regions by reducing syscall
+        overhead and data copying.
+        For sequential one-pass reads, regular buffered I/O may be faster.
 
     Raises:
         TypeError:
@@ -621,10 +649,13 @@ class BinaryFile:
     """
 
     _fh: IO[bytes]
+    _mm: mmap.mmap | None
+    _mv: memoryview | None  # view of _mm
     _path: str  # absolute path of file
     _name: str  # name of file or handle
     _close: bool  # file needs to be closed
     _closed: bool  # file is closed
+    _lock: contextlib.AbstractContextManager[Any]
     _ext: ClassVar[set[str]] = set()  # valid extensions, empty for any
 
     def __init__(
@@ -633,13 +664,16 @@ class BinaryFile:
         /,
         *,
         mode: Literal['r', 'r+'] | None = None,
+        memmap: bool = False,
     ) -> None:
 
+        self._mm = None
+        self._mv = None
         self._path = ''
         self._name = 'Unnamed'
         self._close = False
         self._closed = False
-        self._lock: threading.RLock | NullLock = NullLock()
+        self._lock = contextlib.nullcontext()
 
         if isinstance(file, (str, os.PathLike)):
             ext = os.path.splitext(file)[-1].lower()
@@ -703,6 +737,23 @@ class BinaryFile:
         else:
             self._name = type(file).__name__
 
+        if memmap:
+            _fh: Any = self._fh
+            if isinstance(_fh, mmap.mmap):
+                self._mm = _fh
+                self._mv = memoryview(self._mm)
+            else:
+                try:
+                    access = (
+                        mmap.ACCESS_WRITE
+                        if self._fh.writable()
+                        else mmap.ACCESS_READ
+                    )
+                    self._mm = mmap.mmap(self._fh.fileno(), 0, access=access)
+                    self._mv = memoryview(self._mm)
+                except OSError:
+                    pass
+
     @property
     def filehandle(self) -> IO[bytes]:
         """File handle."""
@@ -710,17 +761,17 @@ class BinaryFile:
 
     @property
     def filepath(self) -> str:
-        """Absolute path to file, or empty string if unavailable."""
+        """Absolute path to file, or empty string if no path is available."""
         return self._path
 
     @property
     def filename(self) -> str:
-        """Name of file, or empty if no path is available."""
+        """Basename of file path, or empty string if no path is available."""
         return os.path.basename(self._path)
 
     @property
     def dirname(self) -> str:
-        """Directory containing file, or empty if no path is available."""
+        """Directory containing file, or empty string if no path available."""
         return os.path.dirname(self._path)
 
     @property
@@ -733,12 +784,12 @@ class BinaryFile:
         self._name = value
 
     @property
-    def attrs(self) -> Mapping[str, Any]:
+    def attrs(self) -> dict[str, Any]:
         """Selected metadata as dict."""
-        return MappingProxyType({'name': self.name, 'filepath': self.filepath})
+        return {'name': self.name, 'filepath': self.filepath}
 
     @property
-    def lock(self) -> threading.RLock | NullLock:
+    def lock(self) -> contextlib.AbstractContextManager[Any]:
         """Lock for thread-safe file access."""
         return self._lock
 
@@ -746,10 +797,149 @@ class BinaryFile:
         """Enable or disable thread-safe file access.
 
         Parameters:
-            enabled: If true, use a threading.RLock, else a no-op lock.
+            enabled:
+                If true, use a threading.RLock, else a no-op lock.
+                Has no effect when memory-mapped I/O is active.
 
         """
-        self._lock = threading.RLock() if enabled else NullLock()
+        if self._mm is not None:
+            return
+        self._lock = threading.RLock() if enabled else contextlib.nullcontext()
+
+    def _write_at(
+        self, offset: int, data: bytes | bytearray | memoryview, /
+    ) -> None:
+        """Write bytes to file at given offset.
+
+        Parameters:
+            offset: Byte offset from start of file.
+            data: Data to write.
+
+        """
+        if self._mm is not None and self.writable:
+            # writable mmap: direct slice write, no cursor movement
+            self._mm[offset : offset + len(data)] = data
+        else:
+            with self._lock:
+                self._fh.seek(offset)
+                self._fh.write(data)
+
+    def _read_at(self, offset: int, size: int, /) -> bytes | memoryview:
+        """Read bytes from file at given offset.
+
+        For memory-mapped files, returned bytes are exposed as a
+        ``memoryview`` of the mapping. Keeping that view alive may keep
+        the memory map (and associated file resources/lock) alive.
+
+        Parameters:
+            offset: Byte offset from start of file.
+            size: Number of bytes to read.
+
+        """
+        mv = self._mv
+        if mv is not None:
+            return mv[offset : offset + size]
+        fh = self._fh
+        with self._lock:
+            fh.seek(offset)
+            return fh.read(size)
+
+    def _read_array(
+        self,
+        offset: int,
+        count: int,
+        dtype: DTypeLike,
+        *,
+        copy: bool = False,
+        writable: bool = False,
+        truncate: bool | None = False,
+    ) -> NDArray[Any]:
+        """Read numpy array from file at given offset.
+
+        For memory-mapped files, returned data are exposed directly as a
+        NumPy array view of the mapping (zero copy). Keeping that array alive
+        may keep the memory map (and associated file resources/lock) alive.
+
+        Parameters:
+            offset:
+                Byte offset from start of file.
+            count:
+                Number of elements to read. If ``-1``, read to end of file.
+            dtype:
+                Array element type.
+            copy:
+                If true, always return a detached copy in main memory.
+                For memory-mapped files, bypass the direct-view fast path.
+            writable:
+                By default, return read-only array from memory-mapped file.
+                Prevents accidental modification of underlying writable file.
+                Has no effect for non-memory-mapped files (always writeable).
+            truncate:
+                Allow partial reads of array.
+                If None, log error on partial read.
+
+        """
+        dtype = numpy.dtype(dtype)
+        itemsize = dtype.itemsize
+        if offset < 0:
+            msg = f'{offset=} < 0'
+            raise ValueError(msg)
+        if count < -1:
+            msg = f'{count=} < -1'
+            raise ValueError(msg)
+
+        mv = self._mv
+        if mv is not None:
+            if count == -1:
+                count = max(0, (len(mv) - offset) // itemsize)
+            nbytes = count * itemsize
+            size = min(nbytes, max(0, len(mv) - offset))
+            n = size - size % itemsize
+            array = numpy.frombuffer(
+                mv[offset : offset + n],
+                dtype,
+            )
+            if copy:
+                array = array.copy()
+            elif not writable and array.flags.writeable:
+                array.flags.writeable = False
+        elif count > -1:
+            fh = self._fh
+            nbytes = count * itemsize
+            array = numpy.empty(count, dtype)
+            with self._lock:
+                fh.seek(offset)
+                n = fh.readinto(array.data)  # type: ignore[attr-defined]
+        else:
+            fh = self._fh
+            with self._lock:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                count = max(0, (size - offset) // itemsize)
+                nbytes = count * itemsize
+                array = numpy.empty(count, dtype)
+                fh.seek(offset)
+                n = fh.readinto(array.data)  # type: ignore[attr-defined]
+
+        if n != nbytes:
+            array = array[: n // itemsize]
+            msg = f'expected {count} items, got {n // itemsize}'
+            if truncate is None:
+                logging.getLogger(__name__.split('.', 1)[0]).error(msg)
+            elif not truncate:
+                raise ValueError(msg)
+
+        return array
+
+    @property
+    def writable(self) -> bool:
+        """File is open for writing."""
+        return self._fh.writable()
+
+    @property
+    def memmapped(self) -> bool:
+        """File is memory-mapped."""
+        return self._mm is not None
 
     @property
     def closed(self) -> bool:
@@ -759,6 +949,10 @@ class BinaryFile:
     def close(self) -> None:
         """Close file."""
         self._closed = True  # always report file as closed
+        self._mv = None  # do not release(), threads may hold local refs
+        if self._mm is not None and self._mm is not self._fh:  # type: ignore[comparison-overlap]
+            with contextlib.suppress(Exception):
+                self._mm.close()
         if self._close:
             with contextlib.suppress(Exception):
                 self._fh.close()
@@ -801,6 +995,10 @@ class CziFile(BinaryFile):
             Open file objects must be positioned at CZI header.
         mode:
             File open mode if ``file`` is file name. Defaults to ``'r'``.
+        memmap:
+            Map file into memory.
+            Ignored if memory mapping is not available or if the stream does
+            not support it.
         squeeze:
             If True, remove dimensions of length 1 from results.
 
@@ -829,6 +1027,7 @@ class CziFile(BinaryFile):
         /,
         *,
         mode: Literal['r', 'r+', 'rb', 'r+b'] | None = None,
+        memmap: bool = False,
         squeeze: bool = True,
     ) -> None:
         # open CZI file and read header
@@ -839,7 +1038,8 @@ class CziFile(BinaryFile):
             mode_ = 'r'
         elif mode in {'r+', 'r+b'}:
             mode_ = 'r+'
-        super().__init__(file, mode=mode_)
+
+        super().__init__(file, mode=mode_, memmap=memmap)
 
         fh = self._fh
 
@@ -866,10 +1066,11 @@ class CziFile(BinaryFile):
 
     def __enter__(self) -> Self:
         super().__enter__()
-        if self._fh.writable():
-            fh = self._fh
-            fh.seek(self.header.segment.data_offset + 68)
-            fh.write(struct.pack('<i', 1))
+        if self.writable:
+            self._write_at(
+                self.header.segment.data_offset + 68,
+                struct.pack('<i', 1),
+            )
             self.header.update_pending = True
         return self
 
@@ -879,11 +1080,12 @@ class CziFile(BinaryFile):
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if self._fh.writable() and exc_type is None:
-            fh = self._fh
-            fh.seek(self.header.segment.data_offset + 68)
-            fh.write(struct.pack('<i', 0))
-            fh.flush()
+        if self.writable and exc_type is None:
+            self._write_at(
+                self.header.segment.data_offset + 68,
+                struct.pack('<i', 0),
+            )
+            self._fh.flush()
             self.header.update_pending = False
         super().__exit__(exc_type, exc_value, traceback)
 
@@ -1739,15 +1941,13 @@ class CziImage:
         return self.pixeltype.dtype
 
     @cached_property
-    def sizes(self) -> Mapping[str, int]:
+    def sizes(self) -> dict[str, int]:
         """Ordered mapping of dimension name to length."""
         raw = self._raw_sizes
         ordered = {d: raw[d] for d in self._dim_order}
         if self._squeeze:
-            return MappingProxyType(
-                {k: v for k, v in ordered.items() if v > 1}
-            )
-        return MappingProxyType(ordered)
+            return {k: v for k, v in ordered.items() if v > 1}
+        return ordered
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -1929,7 +2129,7 @@ class CziImage:
         return None
 
     @cached_property
-    def coords(self) -> Mapping[str, NDArray[Any]]:
+    def coords(self) -> dict[str, NDArray[Any]]:
         """Mapping of dimension names to physical coordinate arrays.
 
         Only dimensions with meaningful physical coordinates are included.
@@ -1988,7 +2188,7 @@ class CziImage:
             elif dim == 'S' and size > 1:
                 sample_names = ('Red', 'Green', 'Blue', 'Alpha')
                 result[dim] = numpy.array(sample_names[:size])
-        return MappingProxyType(result)
+        return result
 
     @cached_property
     def coord_offsets(self) -> dict[str, float]:
@@ -2063,7 +2263,7 @@ class CziImage:
             return None
 
     @cached_property
-    def channels(self) -> Mapping[str, dict[str, Any]]:
+    def channels(self) -> dict[str, dict[str, Any]]:
         """Per-channel metadata keyed by channel name.
 
         Return a dict keyed by channel name (falling back to channel Id
@@ -2171,10 +2371,10 @@ class CziImage:
         for ch_id, ch_data in image_channels.items():
             key = ch_data.pop('name', '') or ch_id
             result[key] = ch_data
-        return MappingProxyType(result)
+        return result
 
     @cached_property
-    def objective(self) -> Mapping[str, Any]:
+    def objective(self) -> dict[str, Any]:
         """Objective lens metadata keyed by XML tag name.
 
         Return a dict containing a subset of the Objective XML element
@@ -2183,10 +2383,10 @@ class CziImage:
         """
         root = self._parent.xml_element
         if root is None:
-            return MappingProxyType({})
+            return {}
         obj_el = root.find('.//Objectives/Objective')
         if obj_el is None:
-            return MappingProxyType({})
+            return {}
         result: dict[str, Any] = {}
         name = obj_el.get('Name') or obj_el.findtext('Name')
         if name:
@@ -2211,17 +2411,17 @@ class CziImage:
         mfr_model = obj_el.findtext('Manufacturer/Model')
         if mfr_model:
             result['Manufacturer'] = {'Model': mfr_model}
-        return MappingProxyType(result)
+        return result
 
     @cached_property
-    def attrs(self) -> Mapping[str, Any]:
+    def attrs(self) -> dict[str, Any]:
         """Image metadata as dict."""
         result: dict[str, Any] = {
             'filepath': self._parent._path,
         }
         root = self._parent.xml_element
         if root is None:
-            return MappingProxyType(result)
+            return result
 
         if self.datetime is not None:
             result['datetime'] = self.datetime
@@ -2236,7 +2436,7 @@ class CziImage:
             if val:
                 result[key] = val
 
-        return MappingProxyType(result)
+        return result
 
     @property
     def directory_entries(self) -> tuple[CziDirectoryEntryDV, ...]:
@@ -2376,7 +2576,7 @@ class CziImage:
             if not isinstance(subblock, CziSubBlockSegmentData):
                 return
 
-            tile = subblock.data()
+            tile = subblock.data(copy=False)
             if directory_entry.pixel_type != dest_pixeltype:
                 converter = CONVERT_PIXELTYPE.get(
                     (directory_entry.pixel_type, dest_pixeltype)
@@ -2556,7 +2756,7 @@ class CziImage:
 
         if maxworkers is None:
             maxworkers = self._default_maxworkers
-        if maxworkers > 1:
+        if maxworkers > 1 and len(self._entries) > 1:
             # The file-handle lock (set_lock) serialises I/O only.
             # Concurrent numpy writes to `out` are safe as long as tiles do
             # not share output pixels, which holds for non-overlapping tiles.
@@ -3708,15 +3908,10 @@ class CziSegment:
 
     _czifile: CziFile
 
-    def __init__(self, czifile: CziFile, offset: int | None = None, /) -> None:
+    def __init__(self, czifile: CziFile, offset: int, /) -> None:
         self._czifile = czifile
-        fh = czifile.filehandle
-        if offset is not None:
-            fh.seek(offset)
-            self.offset = offset
-        else:
-            self.offset = fh.tell()
-        data = fh.read(32)
+        self.offset = offset
+        data = czifile._read_at(offset, 32)
         try:
             (
                 sid,
@@ -3724,7 +3919,7 @@ class CziSegment:
                 self.used_size,
             ) = struct.unpack('<16sqq', data)
         except struct.error as exc:
-            msg = f'failed to read ZISRAW segment header {data!r}'
+            msg = f'failed to read ZISRAW segment header {bytes(data)!r}'
             raise CziSegmentNotFoundError(msg) from exc
         self.sid = CziSegmentId(sid.rstrip(b'\x00').decode('cp1252'))
         if self.used_size == 0:
@@ -3747,7 +3942,6 @@ class CziSegment:
 
     def data(self) -> CziSegmentData:
         """Read and return segment payload."""
-        self._czifile.filehandle.seek(self.offset + 32)
         return self.sid.read_segment_data(self)
 
     def __repr__(self) -> str:
@@ -3850,7 +4044,10 @@ class CziFileHeaderSegmentData(CziSegmentData):
             self.metadata_position,
             self.update_pending,
             self.attachment_directory_position,
-        ) = struct.unpack('<iiii16s16siqqiq', segment.filehandle.read(80))
+        ) = struct.unpack(
+            '<iiii16s16siqqiq',
+            segment.czifile._read_at(segment.data_offset, 80),
+        )
         self.version = (major, minor)
         self.update_pending = bool(self.update_pending)  # 0xffff = True
         self.primary_file_guid = uuid.UUID(bytes=primary_file_guid)
@@ -3902,9 +4099,9 @@ class CziMetadataSegmentData(CziSegmentData):
             msg = f'{segment.sid!r} != {self.SID!r}'
             raise ValueError(msg)
         self._segment = segment
-        fh = segment.filehandle
-        data = fh.read(256)  # header (8) + spare (248)
-        self.xml_size, self.attachment_size = struct.unpack('<ii', data[:8])
+        # header (8) + spare (248); xml_offset is at +256 per spec
+        data = segment.czifile._read_at(segment.data_offset, 8)
+        self.xml_size, self.attachment_size = struct.unpack('<ii', data)
         self.xml_offset = segment.data_offset + 256
 
     @property
@@ -3914,9 +4111,9 @@ class CziMetadataSegmentData(CziSegmentData):
 
     def data(self) -> str:
         """Read and return XML metadata payload."""
-        fh = self._segment.filehandle
-        fh.seek(self.xml_offset)
-        xml = fh.read(self.xml_size)
+        xml = bytes(
+            self._segment.czifile._read_at(self.xml_offset, self.xml_size)
+        )
         xml = xml.replace(b'\r\n', b'\n').replace(b'\r', b'\n')  # ???
         return xml.decode()
 
@@ -3968,17 +4165,25 @@ class CziSubBlockSegmentData(CziSegmentData):
             msg = f'{segment.sid!r} != {self.SID!r}'
             raise ValueError(msg)
         self._segment = segment
-        fh = segment.filehandle
-        # with fh.lock:
+
+        # read 48: 16-byte subblock header + 32-byte DE header
+        offset = segment.data_offset
+        header = segment.czifile._read_at(offset, 48)
         (
             self.metadata_size,
             self.attachment_size,
             self.data_size,
-        ) = struct.unpack('<iiq', fh.read(16))
-        self.directory_entry = CziDirectoryEntryDV(fh)
-        self.data_offset = fh.tell()
-        self.data_offset += max(240 - self.directory_entry.storage_size, 0)
-        self.data_offset += self.metadata_size
+        ) = struct.unpack_from('<iiq', header)
+        dimensions_count = struct.unpack_from('<i', header, 44)[0]
+
+        # second read starts 16 bytes in and covers variable-length DE
+        offset += 16
+        self.directory_entry = CziDirectoryEntryDV(
+            segment.czifile._read_at(offset, 32 + dimensions_count * 20),
+            offset,
+        )
+        storage = self.directory_entry.storage_size
+        self.data_offset = offset + max(240, storage) + self.metadata_size
 
     @property
     def segment(self) -> CziSegment:
@@ -4025,10 +4230,11 @@ class CziSubBlockSegmentData(CziSegmentData):
         """
         if self.metadata_size <= 0:
             return {} if asdict else ''
-        fh = self.segment.filehandle
-        with self.segment.czifile.lock:
-            fh.seek(self.data_offset - self.metadata_size)
-            metadata = fh.read(self.metadata_size)
+        metadata = bytes(
+            self.segment.czifile._read_at(
+                self.data_offset - self.metadata_size, self.metadata_size
+            )
+        )
         if fixesc and b'&lt;' in metadata and b'&gt;' in metadata:
             # work around bug in CZI writer
             metadata = metadata.replace(b'&lt;', b'<').replace(b'&gt;', b'>')
@@ -4037,101 +4243,97 @@ class CziSubBlockSegmentData(CziSegmentData):
         return metadata.decode()
 
     @overload
-    def data(self, *, raw: Literal[False] = ...) -> NDArray[Any]: ...
+    def data(
+        self, *, raw: Literal[False] = ..., copy: bool = ...
+    ) -> NDArray[Any]: ...
 
     @overload
-    def data(self, *, raw: Literal[True]) -> bytes: ...
+    def data(
+        self, *, raw: Literal[True], copy: Literal[True] = ...
+    ) -> bytes: ...
 
     @overload
-    def data(self, *, raw: bool = False) -> bytes | NDArray[Any]: ...
+    def data(
+        self, *, raw: Literal[True], copy: Literal[False]
+    ) -> bytes | memoryview: ...
 
-    def data(self, *, raw: bool = False) -> bytes | NDArray[Any]:
+    @overload
+    def data(
+        self, *, raw: bool = False, copy: bool = True
+    ) -> bytes | memoryview | NDArray[Any]: ...
+
+    def data(
+        self, *, raw: bool = False, copy: bool = True
+    ) -> bytes | memoryview | NDArray[Any]:
         """Return image data from file.
 
         Parameters:
             raw:
-                If false (default), return decoded image data from file,
-                else return undecoded data.
+                Return undecoded data from file.
+            copy:
+                Return owned copy detached from the file mapping.
+                If true (default), always return an array that owns its
+                data. If false, an uncompressed mmap-backed subblock may
+                return a borrowed view.
+                If ``raw=True`` and ``copy=False``, return undecoded bytes
+                directly from :py:meth:`BinaryFile._read_at` (zero-copy for
+                memory-mapped files).
 
         """
         de: CziDirectoryEntryDV = self.directory_entry
         # bypass property descriptors on hot path
-        czi = self._segment._czifile
-        fh = czi._fh
-        lock = czi._lock
+        czifile = self._segment._czifile
         if raw:
-            with lock:
-                fh.seek(self.data_offset)
-                return fh.read(self.data_size)
+            data = czifile._read_at(self.data_offset, self.data_size)
+            return bytes(data) if copy else data
+
         dtype = de.pixel_type.dtype
         shape = de.stored_shape
         total = product(shape)
         size = total * dtype.itemsize
         compression = de.compression
+        pixeltype = de.pixel_type
         decode = de.decode
-        decode_cache = czi._cache
+        decode_cache = czifile._cache
         if decode is not None:
             cached = decode_cache.get(self.data_offset)
             if cached is not None:
                 return cached
         if decode is not None:
-            with lock:
-                fh.seek(self.data_offset)
-                data = fh.read(self.data_size)
+            data = czifile._read_at(self.data_offset, self.data_size)
             if len(data) != self.data_size:
                 msg = 'failed to read all segment data'
                 raise CziFileError(msg)
             if self.data_size == size:
                 # TODO: report bug in CZI writer
                 image = numpy.frombuffer(data, dtype)
-            elif compression == 6:
-                # ZSTD1: byte 0 is the total header size (including itself).
-                # The header body (bytes 1..header_size-1) is a sequence
-                # of typed chunks. Currently only chunk type 1 is defined,
-                # whose single payload byte's LSB is the hi/lo byte-shuffle
-                # flag. Unknown chunk types are skipped for forward
-                # compatibility. Data starts at byte offset header_size.
-                if self.data_size < 2:
-                    msg = f'Zstd1 data too short {self.data_size}'
-                    raise CziFileError(msg)
-                header_size = data[0]
-                if header_size == 0 or header_size >= self.data_size:
-                    msg = f'invalid Zstd1 header {data[:4]!r}'
-                    raise CziFileError(msg)
-                hilo = False
-                pos = 1
-                while pos < header_size:
-                    chunk_type = data[pos]
-                    pos += 1
-                    if chunk_type == 1:
-                        if pos >= header_size:
-                            msg = 'truncated Zstd1 chunk type 1'
-                            raise CziFileError(msg)
-                        hilo = (data[pos] & 1) != 0
-                        pos += 1
-                    # unknown chunk types: no defined payload length -
-                    # stop parsing and let the decoder handle the rest
-                    else:
-                        break
-                offset = header_size
-                # use memoryview to avoid copying compressed bytes
-                # when skipping the small fixed-size ZSTD1 header
-                image = decode(memoryview(data)[offset:], out=size)
-                image = numpy.frombuffer(image, dtype)
-                if hilo:
-                    image = imagecodecs.byteshuffle_decode(image)
+            elif compression in {5, 6}:
+                # ZSTD: pass itemsize for hilo byte-shuffle unshuffle
+                # and samples for BGR->RGB conversion
+                image = numpy.frombuffer(
+                    decode(
+                        data,
+                        itemsize=dtype.itemsize,
+                        samples=pixeltype.samples,
+                        out=size,
+                    ),
+                    dtype,
+                )
+            elif compression == 2:
+                # LZW
+                image = numpy.frombuffer(decode(data, out=size), dtype)
             else:
                 image = decode(data, out=size)
-                if compression in {2, 5}:
-                    # LZW, ZSTD
-                    image = numpy.frombuffer(image, dtype)
         elif compression == 0 or compression > 999:
             # SYSTEMRAW (>999) and CAMERARAW (100-999) are read as raw,
             # uncompressed pixels. Callers compositing via CziImage.asarray
             # see a warning there. Direct callers of data() do not.
-            with lock:
-                fh.seek(self.data_offset)
-                image = read_array(fh, dtype, self.data_size // dtype.itemsize)
+            image = czifile._read_array(
+                self.data_offset,
+                self.data_size // dtype.itemsize,
+                dtype,
+                truncate=False,
+            )
         else:
             msg = f'{compression!r} invalid or not supported'
             raise ValueError(msg)
@@ -4158,16 +4360,19 @@ class CziSubBlockSegmentData(CziSegmentData):
                         break
                     adjusted[i] = s  # reset and try next dim
         image = image.reshape(shape)
-        if compression not in {1, 4}:
-            if shape[-1] == 3:
-                # BGR -> RGB
-                image = image[..., ::-1].copy()
-            elif shape[-1] == 4:
-                # BGRA -> RGBA; alpha is forced to 255 (fully opaque),
-                # matching Zeiss software
-                image = image[..., [2, 1, 0, 3]].copy()
+        # detach from file mmap before any in-place modifications
+        if decode is None and copy and czifile._mm is not None:
+            image = image.copy()
+        if compression not in {1, 4, 5, 6} and pixeltype.samples in {3, 4}:
+            if not image.flags.writeable:
+                image = image.copy()
+            # BGR -> RGB or BGRA -> RGBA: swap channels 0 and 2 in-place
+            tmp = image[..., 0].copy()
+            image[..., 0] = image[..., 2]
+            image[..., 2] = tmp
+            if pixeltype.samples == 4:
+                # alpha forced to 255 (fully opaque), matching Zeiss
                 image[..., 3] = 255
-
         if decode is not None:
             decode_cache.put(self.data_offset, image)
         return image
@@ -4181,20 +4386,19 @@ class CziSubBlockSegmentData(CziSegmentData):
         """
         if self.attachment_size < 1:
             return ()
-        fh = self.segment.filehandle
-        with self.segment.czifile.lock:
-            fh.seek(self.data_offset + self.data_size)
-            data = fh.read(self.attachment_size)
-            xml = self.metadata(asdict=False)
+        data = self.segment.czifile._read_at(
+            self.data_offset + self.data_size, self.attachment_size
+        )
+        xml = self.metadata(asdict=False)
         if 'CHUNKCONTAINER' not in xml:
-            return ((b'', data),)
+            return ((b'', bytes(data)),)
         attachments = []
         index = 0
         while index < self.attachment_size - 20:
-            guid, size = struct.unpack('<16si', data[index : index + 20])
+            guid, size = struct.unpack_from('<16si', data, index)
             index += 20
             if index + size <= self.attachment_size:
-                attachments.append((guid, data[index : index + size]))
+                attachments.append((guid, bytes(data[index : index + size])))
             index += size
         return tuple(attachments)
 
@@ -4212,17 +4416,27 @@ class CziSubBlockSegmentData(CziSegmentData):
         """
         if self.attachment_size < 32:
             return None
-        attachments = self.attachments()
-        if len(attachments) < 1 or len(attachments[0][1]) < 16:
-            return None
         # valid-pixel-mask GUID not listed in specification
         guid = b'g\xea\xe3\xcb\xfc[+I\xa1j\xec\xe3x\x03\x14H'
-        if attachments[0][0] == guid:
-            data = attachments[0][1]
-        elif attachments[0][1][:16] == guid:
-            data = attachments[0][1][16:]
+        # read only the first 20 bytes (guid:16 + chunk_size:4) to check
+        # whether a mask is present before reading the full attachment blob
+        offset = self.data_offset + self.data_size
+        header = self._segment._czifile._read_at(offset, 20)
+        if header[:16] == guid:
+            # CHUNKCONTAINER layout: [guid:16][size:4i][mask_header:16][bits]
+            chunk_size = struct.unpack_from('<i', header, 16)[0]
+            if chunk_size < 16 or chunk_size > self.attachment_size - 20:
+                return None
+            data = self._segment._czifile._read_at(offset + 20, chunk_size)
         else:
-            return None
+            # raw layout: whole attachment is [guid:16][mask_header:16][bits]
+            tail = self.attachment_size - 16
+            if tail < 16:
+                return None
+            data = self._segment._czifile._read_at(offset + 16, tail)
+            if data[:16] != guid:
+                return None
+            data = data[16:]
         width, height, typerepr, stride = struct.unpack('<IIII', data[:16])
         if (
             typerepr != 0
@@ -4249,7 +4463,10 @@ class CziDirectoryEntryDV:
     Image subset indices and size information.
 
     Parameters:
-        fh: File handle to read from.
+        data:
+            Buffer starting at entry.
+        offset:
+            Absolute file position of entry.
 
     """
 
@@ -4323,8 +4540,8 @@ class CziDirectoryEntryDV:
 
     _start_coordinate_raw: bytes
 
-    def __init__(self, fh: IO[bytes], /) -> None:
-        self.offset = fh.tell()
+    def __init__(self, data: bytes | memoryview, offset: int, /) -> None:
+        self.offset = offset
         (
             schema_type,
             pixel_type,  # PixelTypes
@@ -4335,7 +4552,7 @@ class CziDirectoryEntryDV:
             _,  # reserved1
             _,  # reserved2
             self.dimensions_count,
-        ) = struct.unpack('<2siqiiBB4si', fh.read(32))
+        ) = struct.unpack_from('<2siqiiBB4si', data)
 
         if schema_type != b'DV':
             # TODO: support schema DE, a fixed 128-byte legacy format?
@@ -4357,16 +4574,15 @@ class CziDirectoryEntryDV:
         start_coordinate = []
         stored_shape = []
 
-        data = fh.read(self.dimensions_count * 20)
-        for i in reversed(range(0, self.dimensions_count * 20, 20)):
-            (
-                dimension,
-                dim_start,
-                size,
-                dim_start_coordinate,
-                stored_size,
-            ) = struct.unpack('<4siifi', data[i : i + 20])
-            dimension = dimension.rstrip(b'\x00').decode('cp1252')
+        n = self.dimensions_count
+        fields = struct.unpack_from('<' + '4siifi' * n, data, 32)
+        for j in reversed(range(n)):
+            base = j * 5
+            dimension = fields[base].rstrip(b'\x00').decode('cp1252')
+            dim_start = fields[base + 1]
+            size = fields[base + 2]
+            dim_start_coordinate = fields[base + 3]
+            stored_size = fields[base + 4]
             if dimension == 'M':
                 self.mosaic_index = dim_start
                 continue
@@ -4472,7 +4688,7 @@ class CziDirectoryEntryDV:
         )
 
     def read_dimension_entries(
-        self, fh: IO[bytes], /
+        self, fh: BinaryFile, /
     ) -> dict[CziDimensionType, CziDimensionEntryDV1]:
         """Return all dimension entries from file, including M and S.
 
@@ -4480,11 +4696,10 @@ class CziDirectoryEntryDV:
         dimension without filtering, keyed by :py:class:`CziDimensionType`.
 
         Parameters:
-            fh: File handle to read from.
+            fh: Binary file to read from.
 
         """
-        fh.seek(self.offset + 32)
-        data = fh.read(self.dimensions_count * 20)
+        data = fh._read_at(self.offset + 32, self.dimensions_count * 20)
         dimension_entries = {}
         for i in range(0, self.dimensions_count * 20, 20):
             dim = CziDimensionEntryDV1(data[i : i + 20])
@@ -4502,49 +4717,42 @@ class CziDirectoryEntryDV:
             czifile: CZI file to read from.
 
         """
-        fh = czifile._fh
-        lock = czifile._lock
         pos = self.file_position
-        with lock:
-            fh.seek(pos)
-            # All needed header fields fit in the first 48 bytes:
-            # [0:16] SID, [16:32] allocated/used sizes,
-            # [32:48] metadata_size / attachment_size / data_size.
-            header = fh.read(48)
-            # Fast path: segment is a live ZISRAWSUBBLOCK.
-            # Compute data_offset from the already-known storage_size
-            # instead of constructing a new CziDirectoryEntryDV.
-            if header[:14] == b'ZISRAWSUBBLOCK':
-                allocated_size, used_size = struct.unpack_from(
-                    '<qq', header, 16
-                )
-                if used_size == 0:
-                    used_size = allocated_size
-                metadata_size, attachment_size, data_size = struct.unpack_from(
-                    '<iiq', header, 32
-                )
-                storage = self.storage_size  # 32 + dimensions_count * 20
-                data_offset = pos + 48 + max(240, storage) + metadata_size
-                segmentdata = CziSubBlockSegmentData.__new__(
-                    CziSubBlockSegmentData
-                )
-                seg = CziSegment.__new__(CziSegment)
-                seg.sid = CziSegmentId.ZISRAWSUBBLOCK
-                seg.offset = pos
-                seg.allocated_size = allocated_size
-                seg.used_size = used_size
-                seg._czifile = czifile
-                segmentdata._segment = seg
-                segmentdata.directory_entry = self
-                segmentdata.metadata_size = metadata_size
-                segmentdata.attachment_size = attachment_size
-                segmentdata.data_size = data_size
-                segmentdata.data_offset = data_offset
-                return segmentdata
+        # All needed header fields fit in the first 48 bytes:
+        # [0:16] SID, [16:32] allocated/used sizes,
+        # [32:48] metadata_size / attachment_size / data_size.
+        header = czifile._read_at(pos, 48)
+        # Fast path: segment is a live ZISRAWSUBBLOCK.
+        # Compute data_offset from the already-known storage_size
+        # instead of constructing a new CziDirectoryEntryDV.
+        if header[:14] == b'ZISRAWSUBBLOCK':
+            allocated_size, used_size = struct.unpack_from('<qq', header, 16)
+            if used_size == 0:
+                used_size = allocated_size
+            metadata_size, attachment_size, data_size = struct.unpack_from(
+                '<iiq', header, 32
+            )
+            storage = self.storage_size  # 32 + dimensions_count * 20
+            data_offset = pos + 48 + max(240, storage) + metadata_size
+            segmentdata = CziSubBlockSegmentData.__new__(
+                CziSubBlockSegmentData
+            )
+            seg = CziSegment.__new__(CziSegment)
+            seg.sid = CziSegmentId.ZISRAWSUBBLOCK
+            seg.offset = pos
+            seg.allocated_size = allocated_size
+            seg.used_size = used_size
+            seg._czifile = czifile
+            segmentdata._segment = seg
+            segmentdata.directory_entry = self
+            segmentdata.metadata_size = metadata_size
+            segmentdata.attachment_size = attachment_size
+            segmentdata.data_size = data_size
+            segmentdata.data_offset = data_offset
+            return segmentdata
 
-            # slow fallback path: DELETED segment or unexpected type
-            fallback = CziSegment(czifile, pos).data()
-
+        # slow fallback path: DELETED segment or unexpected type
+        fallback = CziSegment(czifile, pos).data()
         if fallback.SID == CziSubBlockSegmentData.SID:
             return cast(CziSubBlockSegmentData, fallback)
         return cast(CziDeletedSegmentData, fallback)
@@ -4598,7 +4806,7 @@ class CziDimensionEntryDV1:
     stored_size: int
     """Stored size if sub or supersampling, else 0."""
 
-    def __init__(self, data: bytes, /) -> None:
+    def __init__(self, data: bytes | memoryview, /) -> None:
         (
             dimension,
             self.start,
@@ -4653,13 +4861,16 @@ class CziSubBlockDirectorySegmentData(CziSegmentData):
             msg = f'{segment.sid!r} != {self.SID!r}'
             raise ValueError(msg)
         self._segment = segment
-        fh = segment.filehandle
-        entry_count = int.from_bytes(
-            fh.read(128)[:4], byteorder='little', signed=True  # +124 reserved
-        )
-        self.entries = tuple(
-            CziDirectoryEntryDV(fh) for _ in range(entry_count)
-        )
+        offset = segment.data_offset
+        data = memoryview(segment.czifile._read_at(offset, segment.used_size))
+        entry_count = struct.unpack_from('<i', data)[0]  # +124 reserved
+        pos = 128
+        entries = []
+        for _ in range(entry_count):
+            e = CziDirectoryEntryDV(data[pos:], offset + pos)
+            pos += e.storage_size
+            entries.append(e)
+        self.entries = tuple(entries)
 
     @staticmethod
     def file_positions(fh: IO[bytes], /) -> tuple[int, ...]:
@@ -4730,13 +4941,12 @@ class CziAttachmentSegmentData(CziSegmentData):
             msg = f'{segment.sid!r} != {self.SID!r}'
             raise ValueError(msg)
         self._segment = segment
-        fh = segment.filehandle
-        self.data_size = int.from_bytes(
-            fh.read(16)[:4], byteorder='little', signed=True  # +12 reserved
-        )
-        self.attachment_entry = CziAttachmentEntryA1(fh)
-        fh.seek(112, 1)  # reserved
-        self.data_offset = fh.tell()
+        offset = segment.data_offset
+        # read 144: 16-byte header (data_size + reserved) + 128-byte entry
+        header = segment.czifile._read_at(offset, 144)
+        self.data_size = struct.unpack_from('<i', header)[0]
+        self.attachment_entry = CziAttachmentEntryA1(header[16:], offset + 16)
+        self.data_offset = offset + 256  # 16 + 128 + 112 reserved
 
     @property
     def segment(self) -> CziSegment:
@@ -4763,18 +4973,25 @@ class CziAttachmentSegmentData(CziSegmentData):
             filename = self.attachment_entry.filename
         filename = os.path.join(directory, filename)
         with open(filename, 'wb') as fh:
-            fh.write(self.data(raw=True))
+            fh.write(self.data(raw=True, copy=False))
 
     @overload
-    def data(self, *, raw: Literal[True]) -> bytes: ...
+    def data(
+        self, *, raw: Literal[True], copy: Literal[True] = ...
+    ) -> bytes: ...
 
     @overload
-    def data(self, *, raw: Literal[False] = ...) -> Any: ...
+    def data(
+        self, *, raw: Literal[True], copy: Literal[False]
+    ) -> bytes | memoryview: ...
 
     @overload
-    def data(self, *, raw: bool) -> Any: ...
+    def data(self, *, raw: Literal[False] = ..., copy: bool = ...) -> Any: ...
 
-    def data(self, *, raw: bool = False) -> Any:
+    @overload
+    def data(self, *, raw: bool, copy: bool = True) -> Any: ...
+
+    def data(self, *, raw: bool = False, copy: bool = True) -> Any:
         """Return content of embedded attachment.
 
         Parameters:
@@ -4782,14 +4999,19 @@ class CziAttachmentSegmentData(CziSegmentData):
                 If true, return contents as bytes, else return decoded
                 contents according to
                 :py:attr:`CziContentFileType.read_content`.
+            copy:
+                Return owned copy detached from the file mapping.
+                Only applies when ``raw=True``.
+                If false and the file is memory-mapped, may return
+                a ``memoryview``.
 
         """
-        fh = self.segment.filehandle
-        fh.seek(self.data_offset)
+        data = self._segment._czifile._read_at(
+            self.data_offset, self.data_size
+        )
         if raw:
-            return fh.read(self.data_size)
-        cft = self.attachment_entry.content_file_type
-        return cft.read_content(fh, self.data_size)
+            return bytes(data) if copy else data
+        return self.attachment_entry.content_file_type.read_content(data)
 
     def __str__(self) -> str:
         return indent(repr(self), self.attachment_entry)
@@ -4802,7 +5024,10 @@ class CziAttachmentEntryA1:
     and :py:class:`CziAttachmentDirectorySegmentData`.
 
     Parameters:
-        fh: File handle to read from.
+        data:
+            Buffer of exactly 128 bytes starting at entry.
+        offset:
+            Absolute file position of entry.
 
     """
 
@@ -4833,8 +5058,8 @@ class CziAttachmentEntryA1:
     content_file_type: CziContentFileType
     """Content file identifier."""
 
-    def __init__(self, fh: IO[bytes], /) -> None:
-        self.offset = fh.tell()
+    def __init__(self, data: bytes | memoryview, offset: int, /) -> None:
+        self.offset = offset
         (
             schema_type,
             _,  # reserved
@@ -4843,7 +5068,7 @@ class CziAttachmentEntryA1:
             content_guid,
             content_file_type,
             name,
-        ) = struct.unpack('<2s10sqi16s8s80s', fh.read(128))
+        ) = struct.unpack_from('<2s10sqi16s8s80s', data)
         if schema_type != b'A1':
             msg = 'not a CziAttachmentEntryA1'
             raise CziFileError(msg)
@@ -4895,8 +5120,7 @@ class CziAttachmentEntryA1:
             czifile: CZI file to read from.
 
         """
-        with czifile.lock:
-            segmentdata = CziSegment(czifile, self.file_position).data()
+        segmentdata = CziSegment(czifile, self.file_position).data()
         if segmentdata.SID == CziAttachmentSegmentData.SID:
             return cast(CziAttachmentSegmentData, segmentdata)
         return cast(CziDeletedSegmentData, segmentdata)
@@ -4937,12 +5161,12 @@ class CziAttachmentDirectorySegmentData(CziSegmentData):
             msg = f'{segment.sid!r} != {self.SID!r}'
             raise ValueError(msg)
         self._segment = segment
-        fh = segment.filehandle
-        entry_count = int.from_bytes(
-            fh.read(256)[:4], byteorder='little', signed=True  # +252 reserved
-        )
+        offset = segment.data_offset
+        data = memoryview(segment.czifile._read_at(offset, segment.used_size))
+        entry_count = struct.unpack_from('<i', data)[0]  # +252 reserved
         self.entries = tuple(
-            CziAttachmentEntryA1(fh) for _ in range(entry_count)
+            CziAttachmentEntryA1(data[256 + i * 128 :], offset + 256 + i * 128)
+            for i in range(entry_count)
         )
 
     @staticmethod
@@ -5044,11 +5268,14 @@ class CziEventListEntry:
     """CziEventListEntry content schema.
 
     Parameters:
-        fh: File handle to read from.
+        data: Byte stream of event list entry.
 
     """
 
-    __slots__ = ('time', 'event_type', 'description')
+    __slots__ = ('size', 'time', 'event_type', 'description')
+
+    size: int
+    """Total byte size of entry including header."""
 
     time: float
     """Time of event in seconds relative to controller start time."""
@@ -5059,14 +5286,16 @@ class CziEventListEntry:
     description: str
     """Description of event."""
 
-    def __init__(self, fh: IO[bytes], /) -> None:
+    def __init__(self, data: bytes | memoryview, /) -> None:
         (
-            _,  # size
+            self.size,
             self.time,
             event_type,
             description_size,
-        ) = struct.unpack('<idii', fh.read(20))
-        self.description = fh.read(description_size).rstrip(b'\x00').decode()
+        ) = struct.unpack_from('<idii', data)
+        self.description = (
+            bytes(data[20 : 20 + description_size]).rstrip(b'\x00').decode()
+        )
         self.event_type = CziEventType(event_type)
 
     def __repr__(self) -> str:
@@ -5138,24 +5367,28 @@ class CziSubBlockLayout:
 
 
 def read_event_list(
-    fh: IO[bytes], size: int = 0, /
+    data: bytes | memoryview, /
 ) -> tuple[CziEventListEntry, ...]:
-    """Return sequence of CziEventListEntry from file.
+    """Return sequence of CziEventListEntry from bytes.
 
     CZEVL EventList content schema.
 
     Parameters:
-        fh: File handle to read from.
-        size: Size of attachment.
+        data: Raw attachment data.
 
     """
-    del size
-    _, number = struct.unpack('<ii', fh.read(8))
-    return tuple(CziEventListEntry(fh) for _ in range(number))
+    _, number = struct.unpack_from('<ii', data)
+    pos = 8
+    entries = []
+    for _ in range(number):
+        e = CziEventListEntry(data[pos:])
+        pos += e.size
+        entries.append(e)
+    return tuple(entries)
 
 
-def read_time_stamps(fh: IO[bytes], size: int = 0, /) -> NDArray[Any]:
-    """Return time stamps from file as float64 values.
+def read_time_stamps(data: bytes | memoryview, /) -> NDArray[Any]:
+    """Return time stamps from bytes as float64 values.
 
     CZTIMS TimeStamps content schema.
 
@@ -5163,64 +5396,66 @@ def read_time_stamps(fh: IO[bytes], size: int = 0, /) -> NDArray[Any]:
     to the start of acquisition or OLE Automation Dates.
 
     Parameters:
-        fh:
-            File handle to read from.
-        size:
-            Size of attachment.
+        data: Raw attachment data.
 
     """
-    del size
-    _, number = struct.unpack('<ii', fh.read(8))
-    return read_array(fh, dtype='<f8', count=number)
+    _, number = struct.unpack_from('<ii', data)
+    return numpy.frombuffer(data, dtype='<f8', count=number, offset=8).copy()
 
 
-def read_focus_positions(fh: IO[bytes], size: int = 0, /) -> NDArray[Any]:
-    """Return focus positions from file in um relative to acquisition start.
+def read_focus_positions(data: bytes | memoryview, /) -> NDArray[Any]:
+    """Return focus positions from bytes in um relative to acquisition start.
 
     CZFOC FocusPositions content schema.
 
     Parameters:
-        fh: File handle to read from.
-        size: Size of attachment.
+        data: Raw attachment data.
 
     """
-    del size
-    _, number = struct.unpack('<ii', fh.read(8))
-    return read_array(fh, dtype='<f8', count=number)
+    _, number = struct.unpack_from('<ii', data)
+    return numpy.frombuffer(data, dtype='<f8', count=number, offset=8).copy()
 
 
 def read_lookup_table(
-    fh: IO[bytes], size: int = 0, /
+    data: bytes | memoryview, /
 ) -> tuple[tuple[str, NDArray[Any]], ...]:
-    """Return sequence of lookup table identifiers and arrays from file.
+    """Return sequence of lookup table identifiers and arrays from bytes.
 
     CZLUT LookupTables content schema.
 
     Parameters:
-        fh: File handle to read from.
-        size: Size of attachment.
+        data: Raw attachment data.
 
     """
+    size = len(data)
     if size < 8:
         return ()
-    start = fh.tell()
-    end = start + size
-    _, number_luts = struct.unpack('<ii', fh.read(8))
+    _, number_luts = struct.unpack_from('<ii', data)
+    pos = 8
     luts = []
     for _ in range(number_luts):
-        if fh.tell() + 88 > end:
+        if pos + 88 > size:
             break
         # LookupTableEntry
-        _, identifier, number_components = struct.unpack('<i80si', fh.read(88))
+        _, identifier, number_components = struct.unpack_from(
+            '<i80si', data, pos
+        )
+        pos += 88
         components = [None] * number_components
         for _ in range(number_components):
-            if fh.tell() + 12 > end:
+            if pos + 12 > size:
                 break
             # ComponentEntry
-            _, component_type, number_ints = struct.unpack('<iii', fh.read(12))
-            if fh.tell() + number_ints * 2 > end:
+            _, component_type, number_ints = struct.unpack_from(
+                '<iii', data, pos
+            )
+            pos += 12
+            if pos + number_ints * 2 > size:
                 break
-            intensity = read_array(fh, dtype='<i2', count=number_ints)
+            intensity = numpy.frombuffer(
+                data, dtype='<i2', count=number_ints, offset=pos
+            ).copy()
+            pos += number_ints * 2
             if component_type == -1:  # RGB
                 # TODO: no test file available
                 components = intensity.reshape((-1, 3)).T  # type: ignore[assignment]
@@ -5236,59 +5471,54 @@ def read_lookup_table(
     return tuple(luts)
 
 
-def read_xml(fh: IO[bytes], size: int, /) -> str:
-    """Return XML from file.
+def read_xml(data: bytes | memoryview, /) -> str:
+    """Return XML from bytes.
 
     Parameters:
-        fh: File handle to read from.
-        size: Size of attachment.
+        data: Raw attachment data.
 
     """
-    return fh.read(size).rstrip(b'\x00').decode()
+    return bytes(data).rstrip(b'\x00').decode()
 
 
-def read_jpeg(fh: IO[bytes], size: int = 0, /) -> NDArray[Any]:
-    """Return decoded JPEG image from file.
+def read_jpeg(data: bytes | memoryview, /) -> NDArray[Any]:
+    """Return decoded JPEG image from bytes.
 
     Parameters:
-        fh: File handle to read from.
-        size: Size of attachment.
+        data: Raw attachment data.
 
     """
-    return imagecodecs.jpeg8_decode(fh.read(size))
+    return imagecodecs.jpeg8_decode(data)
 
 
-def read_czi(fh: IO[bytes], size: int = 0, /) -> NDArray[Any]:
+def read_czi(data: bytes | memoryview, /) -> NDArray[Any]:
     """Return image from embedded CZI file.
 
     Parameters:
-        fh: File handle to read from.
-        size: Size of attachment.
+        data: Raw attachment data.
 
     """
-    return imread(io.BytesIO(fh.read(size)))
+    return imread(io.BytesIO(data))
 
 
-def read_gzip(fh: IO[bytes], size: int = 0, /) -> bytes:
-    """Return decoded GZIP stream from file.
+def read_gzip(data: bytes | memoryview, /) -> bytes:
+    """Return decoded GZIP stream from bytes.
 
     Parameters:
-        fh: File handle to read from.
-        size: Size of attachment.
+        data: Raw attachment data.
 
     """
-    return bytes(imagecodecs.gzip_decode(fh.read(size)))
+    return bytes(imagecodecs.gzip_decode(data))
 
 
-def read_bytes(fh: IO[bytes], size: int, /) -> bytes:
-    """Return bytes from file.
+def read_bytes(data: bytes | memoryview, /) -> bytes:
+    """Return bytes copy from bytes or memoryview.
 
     Parameters:
-        fh: File handle to read from.
-        size: Size of attachment.
+        data: Raw attachment data.
 
     """
-    return bytes(fh.read(size))
+    return bytes(data)
 
 
 class CziSegmentId(enum.StrEnum):
@@ -5411,13 +5641,13 @@ class CziContentFileType(enum.StrEnum):
     JPG = 'JPG', read_jpeg
     """JPEG compressed thumbnail or preview image."""
 
-    read_content: Callable[..., Any]
+    read_content: Callable[[bytes | memoryview], Any]
     """Callable that decodes attachment content for this file type."""
 
     def __new__(
         cls,
         value: str,
-        read_content: Callable[..., Any] = read_bytes,
+        read_content: Callable[[bytes | memoryview], Any] = read_bytes,
     ) -> Self:
         """Create enum member with associated attachment-content reader."""
         obj = str.__new__(cls, value)
@@ -5647,14 +5877,18 @@ class CziCompressionType(enum.IntEnum):
             case 2:
                 result = imagecodecs.lzw_decode
             case 4:
-                if hasattr(imagecodecs, 'WIC') and imagecodecs.WIC.available:
+                if imagecodecs.WIC.available:
                     result = imagecodecs.wic_decode
                 else:
                     result = imagecodecs.jpegxr_decode
             case 5 | 6:
-                result = imagecodecs.zstd_decode
+                result = imagecodecs.zstd1_decode
             case _:
                 result = None
+        if result is not None:
+            mod = getattr(result, '__module__', '') or ''
+            if mod.split('.', 1)[0] != 'imagecodecs':
+                raise RuntimeError(result)
         return result
 
 
@@ -5865,91 +6099,89 @@ def convert_bgra32_bgr96float(data: NDArray[Any], /) -> NDArray[Any]:
     return data[..., :3].astype(numpy.float32)
 
 
-CONVERT_PIXELTYPE: Mapping[
+CONVERT_PIXELTYPE: dict[
     tuple[CziPixelType, CziPixelType], Callable[[NDArray[Any]], NDArray[Any]]
-] = MappingProxyType(
-    {
-        # (CziPixelType.GRAY8, CziPixelType.GRAY8)
-        (CziPixelType.GRAY8, CziPixelType.GRAY16): convert_byte_word,
-        (CziPixelType.GRAY8, CziPixelType.GRAY32FLOAT): convert_int_float,
-        (CziPixelType.GRAY8, CziPixelType.BGR24): convert_gray_bgr,
-        (CziPixelType.GRAY8, CziPixelType.BGR48): convert_gray8_bgr48,
-        (CziPixelType.GRAY8, CziPixelType.BGR96FLOAT): convert_gray_bgr96float,
-        (CziPixelType.GRAY8, CziPixelType.BGRA32): convert_gray_bgra,
-        (CziPixelType.GRAY16, CziPixelType.GRAY8): convert_word_byte,
-        # (CziPixelType.GRAY16, CziPixelType.GRAY16)
-        (CziPixelType.GRAY16, CziPixelType.GRAY32FLOAT): convert_int_float,
-        (CziPixelType.GRAY16, CziPixelType.BGR24): convert_gray16_bgr24,
-        (CziPixelType.GRAY16, CziPixelType.BGR48): convert_gray_bgr,
-        (
-            CziPixelType.GRAY16,
-            CziPixelType.BGR96FLOAT,
-        ): convert_gray_bgr96float,
-        (CziPixelType.GRAY16, CziPixelType.BGRA32): convert_gray16_bgra32,
-        (CziPixelType.GRAY32FLOAT, CziPixelType.GRAY8): convert_float_byte,
-        (CziPixelType.GRAY32FLOAT, CziPixelType.GRAY16): convert_float_word,
-        # (CziPixelType.GRAY32FLOAT, CziPixelType.GRAY32FLOAT)
-        (
-            CziPixelType.GRAY32FLOAT,
-            CziPixelType.BGR24,
-        ): convert_gray32float_bgr24,
-        (
-            CziPixelType.GRAY32FLOAT,
-            CziPixelType.BGR48,
-        ): convert_gray32float_bgr48,
-        (CziPixelType.GRAY32FLOAT, CziPixelType.BGR96FLOAT): convert_gray_bgr,
-        (
-            CziPixelType.GRAY32FLOAT,
-            CziPixelType.BGRA32,
-        ): convert_gray32float_bgra32,
-        (CziPixelType.BGR24, CziPixelType.GRAY8): convert_bgr_gray8,
-        (CziPixelType.BGR24, CziPixelType.GRAY16): convert_bgr_gray16,
-        (
-            CziPixelType.BGR24,
-            CziPixelType.GRAY32FLOAT,
-        ): convert_bgr_gray32float,
-        # (CziPixelType.BGR24, CziPixelType.BGR24)
-        (CziPixelType.BGR24, CziPixelType.BGR48): convert_byte_word,
-        (CziPixelType.BGR24, CziPixelType.BGR96FLOAT): convert_int_float,
-        (CziPixelType.BGR24, CziPixelType.BGRA32): convert_bgr_bgra,
-        (CziPixelType.BGR48, CziPixelType.GRAY8): convert_bgr_gray8,
-        (CziPixelType.BGR48, CziPixelType.GRAY16): convert_bgr_gray16,
-        (
-            CziPixelType.BGR48,
-            CziPixelType.GRAY32FLOAT,
-        ): convert_bgr_gray32float,
-        (CziPixelType.BGR48, CziPixelType.BGR24): convert_word_byte,
-        # (CziPixelType.BGR48, CziPixelType.BGR48)
-        (CziPixelType.BGR48, CziPixelType.BGR96FLOAT): convert_int_float,
-        (CziPixelType.BGR48, CziPixelType.BGRA32): convert_bgr48_bgra32,
-        (CziPixelType.BGR96FLOAT, CziPixelType.GRAY8): convert_bgr_gray8,
-        (CziPixelType.BGR96FLOAT, CziPixelType.GRAY16): convert_bgr_gray16,
-        (
-            CziPixelType.BGR96FLOAT,
-            CziPixelType.GRAY32FLOAT,
-        ): convert_bgr_gray32float,
-        (CziPixelType.BGR96FLOAT, CziPixelType.BGR24): convert_float_byte,
-        (CziPixelType.BGR96FLOAT, CziPixelType.BGR48): convert_float_word,
-        # (CziPixelType.BGR96FLOAT, CziPixelType.BGR96FLOAT)
-        (
-            CziPixelType.BGR96FLOAT,
-            CziPixelType.BGRA32,
-        ): convert_bgr96float_bgra32,
-        (CziPixelType.BGRA32, CziPixelType.GRAY8): convert_bgr_gray8,
-        (CziPixelType.BGRA32, CziPixelType.GRAY16): convert_bgr_gray16,
-        (
-            CziPixelType.BGRA32,
-            CziPixelType.GRAY32FLOAT,
-        ): convert_bgr_gray32float,
-        (CziPixelType.BGRA32, CziPixelType.BGR24): convert_bgra_bgr,
-        (CziPixelType.BGRA32, CziPixelType.BGR48): convert_bgra32_bgr48,
-        (
-            CziPixelType.BGRA32,
-            CziPixelType.BGR96FLOAT,
-        ): convert_bgra32_bgr96float,
-        # (CziPixelType.BGRA32, CziPixelType.BGRA32)
-    }
-)
+] = {
+    # (CziPixelType.GRAY8, CziPixelType.GRAY8)
+    (CziPixelType.GRAY8, CziPixelType.GRAY16): convert_byte_word,
+    (CziPixelType.GRAY8, CziPixelType.GRAY32FLOAT): convert_int_float,
+    (CziPixelType.GRAY8, CziPixelType.BGR24): convert_gray_bgr,
+    (CziPixelType.GRAY8, CziPixelType.BGR48): convert_gray8_bgr48,
+    (CziPixelType.GRAY8, CziPixelType.BGR96FLOAT): convert_gray_bgr96float,
+    (CziPixelType.GRAY8, CziPixelType.BGRA32): convert_gray_bgra,
+    (CziPixelType.GRAY16, CziPixelType.GRAY8): convert_word_byte,
+    # (CziPixelType.GRAY16, CziPixelType.GRAY16)
+    (CziPixelType.GRAY16, CziPixelType.GRAY32FLOAT): convert_int_float,
+    (CziPixelType.GRAY16, CziPixelType.BGR24): convert_gray16_bgr24,
+    (CziPixelType.GRAY16, CziPixelType.BGR48): convert_gray_bgr,
+    (
+        CziPixelType.GRAY16,
+        CziPixelType.BGR96FLOAT,
+    ): convert_gray_bgr96float,
+    (CziPixelType.GRAY16, CziPixelType.BGRA32): convert_gray16_bgra32,
+    (CziPixelType.GRAY32FLOAT, CziPixelType.GRAY8): convert_float_byte,
+    (CziPixelType.GRAY32FLOAT, CziPixelType.GRAY16): convert_float_word,
+    # (CziPixelType.GRAY32FLOAT, CziPixelType.GRAY32FLOAT)
+    (
+        CziPixelType.GRAY32FLOAT,
+        CziPixelType.BGR24,
+    ): convert_gray32float_bgr24,
+    (
+        CziPixelType.GRAY32FLOAT,
+        CziPixelType.BGR48,
+    ): convert_gray32float_bgr48,
+    (CziPixelType.GRAY32FLOAT, CziPixelType.BGR96FLOAT): convert_gray_bgr,
+    (
+        CziPixelType.GRAY32FLOAT,
+        CziPixelType.BGRA32,
+    ): convert_gray32float_bgra32,
+    (CziPixelType.BGR24, CziPixelType.GRAY8): convert_bgr_gray8,
+    (CziPixelType.BGR24, CziPixelType.GRAY16): convert_bgr_gray16,
+    (
+        CziPixelType.BGR24,
+        CziPixelType.GRAY32FLOAT,
+    ): convert_bgr_gray32float,
+    # (CziPixelType.BGR24, CziPixelType.BGR24)
+    (CziPixelType.BGR24, CziPixelType.BGR48): convert_byte_word,
+    (CziPixelType.BGR24, CziPixelType.BGR96FLOAT): convert_int_float,
+    (CziPixelType.BGR24, CziPixelType.BGRA32): convert_bgr_bgra,
+    (CziPixelType.BGR48, CziPixelType.GRAY8): convert_bgr_gray8,
+    (CziPixelType.BGR48, CziPixelType.GRAY16): convert_bgr_gray16,
+    (
+        CziPixelType.BGR48,
+        CziPixelType.GRAY32FLOAT,
+    ): convert_bgr_gray32float,
+    (CziPixelType.BGR48, CziPixelType.BGR24): convert_word_byte,
+    # (CziPixelType.BGR48, CziPixelType.BGR48)
+    (CziPixelType.BGR48, CziPixelType.BGR96FLOAT): convert_int_float,
+    (CziPixelType.BGR48, CziPixelType.BGRA32): convert_bgr48_bgra32,
+    (CziPixelType.BGR96FLOAT, CziPixelType.GRAY8): convert_bgr_gray8,
+    (CziPixelType.BGR96FLOAT, CziPixelType.GRAY16): convert_bgr_gray16,
+    (
+        CziPixelType.BGR96FLOAT,
+        CziPixelType.GRAY32FLOAT,
+    ): convert_bgr_gray32float,
+    (CziPixelType.BGR96FLOAT, CziPixelType.BGR24): convert_float_byte,
+    (CziPixelType.BGR96FLOAT, CziPixelType.BGR48): convert_float_word,
+    # (CziPixelType.BGR96FLOAT, CziPixelType.BGR96FLOAT)
+    (
+        CziPixelType.BGR96FLOAT,
+        CziPixelType.BGRA32,
+    ): convert_bgr96float_bgra32,
+    (CziPixelType.BGRA32, CziPixelType.GRAY8): convert_bgr_gray8,
+    (CziPixelType.BGRA32, CziPixelType.GRAY16): convert_bgr_gray16,
+    (
+        CziPixelType.BGRA32,
+        CziPixelType.GRAY32FLOAT,
+    ): convert_bgr_gray32float,
+    (CziPixelType.BGRA32, CziPixelType.BGR24): convert_bgra_bgr,
+    (CziPixelType.BGRA32, CziPixelType.BGR48): convert_bgra32_bgr48,
+    (
+        CziPixelType.BGRA32,
+        CziPixelType.BGR96FLOAT,
+    ): convert_bgra32_bgr96float,
+    # (CziPixelType.BGRA32, CziPixelType.BGRA32)
+}
 """Map of (source, target) CziPixelType pairs to converter functions."""
 
 
@@ -6045,13 +6277,13 @@ class DecodeCache:
     __slots__ = ('_data', '_lock', '_maxsize')
 
     _data: dict[int, NDArray[Any]] | None
-    _lock: threading.Lock | NullLock
+    _lock: contextlib.AbstractContextManager[Any]
     _maxsize: int
 
     def __init__(
         self,
         maxsize: int = 0,
-        lock: threading.Lock | NullLock | None = None,
+        lock: contextlib.AbstractContextManager[Any] | None = None,
     ) -> None:
         if lock is None:
             # use a real lock only when the GIL is disabled
@@ -6059,7 +6291,7 @@ class DecodeCache:
             if hasattr(sys, '_is_gil_enabled') and not sys._is_gil_enabled():
                 lock = threading.Lock()
             else:
-                lock = NullLock()
+                lock = contextlib.nullcontext()
         self._lock = lock
         self._data = {} if maxsize > 0 else None
         self._maxsize = max(0, maxsize)
@@ -6138,79 +6370,9 @@ class DecodeCache:
             self._maxsize = prev_maxsize
 
 
-class NullLock:
-    """No-op context manager used as default lock."""
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        pass
-
-
 def logger() -> logging.Logger:
     """Return module logger."""
     return logging.getLogger('czifile')
-
-
-def read_array(
-    fh: IO[bytes],
-    dtype: DTypeLike | None,
-    count: int,
-    offset: int = 0,
-    *,
-    out: NDArray[Any] | None = None,
-) -> NDArray[Any]:
-    """Return NumPy array from file in native byte order.
-
-    Parameters:
-        fh:
-            File handle to read from.
-        dtype:
-            Data type of array to read.
-        count:
-            Number of elements to read.
-        offset:
-            Start position of array-data in file.
-        out:
-            NumPy array to read into. By default, a new array is created.
-
-    """
-    dtype = numpy.dtype(dtype)
-    nbytes = count * dtype.itemsize
-
-    result = numpy.empty(count, dtype) if out is None else out
-
-    if result.nbytes != nbytes:
-        msg = 'size mismatch'
-        raise ValueError(msg)
-
-    if offset:
-        fh.seek(offset)
-
-    try:
-        n = fh.readinto(result)  # type: ignore[attr-defined]
-    except AttributeError:
-        result[:] = numpy.frombuffer(fh.read(nbytes), dtype).reshape(
-            result.shape
-        )
-        n = nbytes
-
-    if n != nbytes:
-        msg = f'failed to read {nbytes} bytes, got {n}'
-        raise ValueError(msg)
-
-    if not result.dtype.isnative:
-        if not dtype.isnative:
-            result.byteswap(inplace=True)
-        result = result.view(result.dtype.newbyteorder())
-    elif result.dtype.isnative != dtype.isnative:
-        result.byteswap(inplace=True)
-
-    if out is not None and hasattr(out, 'flush'):
-        out.flush()
-
-    return result
 
 
 def create_output(
@@ -6613,6 +6775,12 @@ def main(argv: list[str] | None = None) -> int:
         help='Return pixel data at stored resolution. '
         'Skip resampling of Airyscan and PALM tiles.',
     )
+    parser.add_argument(
+        '--memmap',
+        action='store_true',
+        default=False,
+        help='Map file into memory if possible.',
+    )
     _dim_help = (
         'Select {name} dimension. '
         'Accepted values: integer index, start:stop[:step] slice, '
@@ -6678,12 +6846,21 @@ def main(argv: list[str] | None = None) -> int:
         print()
         try:
             if xarray is not None:
+                t0 = time.perf_counter()
                 xa = czi.asxarray()
+                elapsed = time.perf_counter() - t0
                 data = xa.data
                 print(xa)
             else:
+                t0 = time.perf_counter()
                 data = czi.asarray()
+                elapsed = time.perf_counter() - t0
                 print(data)
+            mbs = (
+                (data.nbytes / 1e9) / elapsed if elapsed > 0 else float('inf')
+            )
+            print()
+            print(f'Read time: {elapsed:.3f} s ({mbs:.2f} GB/s)')
             print()
         except Exception as exc:
             print(czi._parent.name, exc)
@@ -6707,7 +6884,7 @@ def main(argv: list[str] | None = None) -> int:
     for fname in files:
         try:
             czi_plotted = False
-            with CziFile(fname) as czi:
+            with CziFile(fname, memmap=args.memmap) as czi:
                 print(czi)
                 print()
                 plot_count = 0
