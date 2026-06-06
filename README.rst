@@ -20,7 +20,7 @@ file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.4.30
+:Version: 2026.6.6
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -42,15 +42,25 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.4 64-bit
-- `NumPy <https://pypi.org/project/numpy>`_ 2.4.4
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.3.6
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.5, 3.15.0b2 64-bit
+- `Numpy <https://pypi.org/project/numpy>`_ 2.4.6
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.6.6
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.4.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.9 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.4.11 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.6.1 (optional)
 
 Revisions
 ---------
+
+2026.6.6
+
+- Refactor segment, directory, and content file parsing (breaking).
+- Add memmap parameter to CziFile/imread for lock-free parallel subblock reads.
+- Add writable property to BinaryFile.
+- Change read_content functions to accept bytes or memoryview.
+- Remove read_array function.
+- Require imagecodecs >= 2026.6.6 for zstd1 codec.
+- Support Python 3.15.
 
 2026.4.30
 
@@ -325,10 +335,10 @@ Low-level access to CZI file segments:
 
     >>> with CziFile('Example.czi') as czi:
     ...     # file header: version, GUIDs, and segment offsets
-    ...     hdr = czi.header
-    ...     assert hdr.version == (1, 0)
-    ...     assert str(hdr.file_guid) == 'f8a61493-053e-c94e-bae0-bc7e96d18997'
-    ...     assert not hdr.update_pending
+    ...     header = czi.header
+    ...     assert header.version == (1, 0)
+    ...     assert str(header.file_guid) == 'f8a61493-053e-c94e-bae0-bc7e96d18997'
+    ...     assert not header.update_pending
     ...
     ...     # iterate all subblock segments sequentially via the directory
     ...     for segdata in czi.subblocks():
