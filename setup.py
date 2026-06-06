@@ -95,14 +95,14 @@ setup(
     project_urls={
         'Bug Tracker': 'https://github.com/cgohlke/czifile/issues',
         'Source Code': 'https://github.com/cgohlke/czifile',
-        # 'Documentation': 'https://',
+        'Documentation': 'https://www.cgohlke.com/docs/czifile/',
     },
     packages=['czifile'],
     package_data={'czifile': ['py.typed']},
     python_requires='>=3.12',
     install_requires=[
         'numpy>=2.1',
-        'imagecodecs>=2026.3.6',
+        'imagecodecs>=2026.6.6',
     ],
     extras_require={'all': ['xarray', 'tifffile', 'matplotlib']},
     entry_points={
@@ -121,5 +121,6 @@ setup(
         'Programming Language :: Python :: 3.12',
         'Programming Language :: Python :: 3.13',
         'Programming Language :: Python :: 3.14',
+        'Programming Language :: Python :: 3.15',
     ],
 )
