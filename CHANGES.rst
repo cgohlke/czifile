@@ -1,6 +1,16 @@
 Revisions
 =========
 
+2026.6.6
+
+- Refactor segment, directory, and content file parsing (breaking).
+- Add memmap parameter to CziFile/imread for lock-free parallel subblock reads.
+- Add writable property to BinaryFile.
+- Change read_content functions to accept bytes or memoryview.
+- Remove read_array function.
+- Require imagecodecs >= 2026.6.6 for zstd1 codec.
+- Support Python 3.15.
+
 2026.4.30
 
 - Omit axes from coords when no meaningful metadata is available (breaking).
