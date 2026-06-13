@@ -29,7 +29,7 @@
 
 """Unittests for the czifile package.
 
-:Version: 2026.6.6
+:Version: 2026.6.12
 
 """
 
@@ -147,6 +147,7 @@ class TestBinaryFile:
         assert fh.dirname == dirname
         assert fh.name == name
         assert fh.closed is False
+        assert fh.filesize == 256
         assert len(fh.filehandle.read()) == 256
         fh.filehandle.seek(10)
         assert fh.filehandle.tell() == 10
@@ -602,6 +603,35 @@ def test_czi(memmap):
         assert de.dtype == numpy.uint16
         assert de.file_position > 0
         assert len(de.start_coordinate) == 6
+
+        # CziDirectoryEntryDV.asimage API
+        img = de.asimage(czi)
+        assert isinstance(img, CziImage)
+        assert img.directory_entries == (de,)
+        assert img.storedsize is False
+        assert img.pixeltype == de.pixel_type
+        assert img.dims == ('Y', 'X')
+        assert img.shape == (181, 312)
+        assert img.start == (0, 0)
+        arr = img.asxarray()
+        assert arr.sizes == {'Y': 181, 'X': 312}
+        assert arr.dtype == de.dtype
+
+        img = de.asimage(czi, squeeze=False)
+        assert img.dims == de.dims
+        assert img.shape == de.shape
+        assert img.asarray().shape == de.shape
+
+        img = de.asimage(czi, pixeltype=CziPixelType.GRAY8)
+        assert img.pixeltype == CziPixelType.GRAY8
+        assert img.dtype == numpy.dtype('uint8')
+        assert img.shape == img.shape
+        assert img.asarray().dtype == numpy.dtype('uint8')
+
+        img = de.asimage(czi, storedsize=True)
+        assert img.storedsize is True
+        assert img.shape == img.shape
+        assert numpy.array_equal(img.asarray(), arr)
 
         # filtered_subblock_directory
         fsd = czi.filtered_subblock_directory
