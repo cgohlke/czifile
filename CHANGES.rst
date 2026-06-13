@@ -1,6 +1,10 @@
 Revisions
 =========
 
+2026.6.12
+
+- Add CziDirectoryEntryDV.asimage convenience method.
+
 2026.6.6
 
 - Refactor segment, directory, and content file parsing (breaking).
