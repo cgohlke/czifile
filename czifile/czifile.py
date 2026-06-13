@@ -47,7 +47,7 @@ file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.6.6
+:Version: 2026.6.12
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -69,15 +69,19 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.13, 3.14.5, 3.15.0b2 64-bit
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.14, 3.14.6, 3.15.0b2 64-bit
 - `Numpy <https://pypi.org/project/numpy>`_ 2.4.6
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.6.6
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.4.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.10.9 (optional)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.0 (optional)
 - `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.6.1 (optional)
 
 Revisions
 ---------
+
+2026.6.12
+
+- Add CziDirectoryEntryDV.asimage convenience method.
 
 2026.6.6
 
@@ -328,6 +332,15 @@ Access pyramid levels:
 ...     assert overview.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 243, 'X': 589}
 ...
 
+Iterate directory entries as CziImage views:
+
+>>> with CziFile('Example.czi') as czi:
+...     for entry in czi.scenes[0].directory_entries:
+...         chunk = entry.asimage(czi)
+...         arr = chunk.asarray()
+...         assert arr.shape == (256, 256)
+...
+
 Access attachments:
 
 >>> with CziFile('Example.czi') as czi:
@@ -395,7 +408,7 @@ View the images and metadata in a CZI file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.6.6'
+__version__ = '2026.6.12'
 
 __all__ = [
     'CONVERT_PIXELTYPE',
@@ -930,6 +943,23 @@ class BinaryFile:
                 raise ValueError(msg)
 
         return array
+
+    @cached_property
+    def filesize(self) -> int:
+        """Size of file in bytes."""
+        if self._mm is not None:
+            return len(self._mm)
+        fh = self._fh
+        try:
+            return os.fstat(fh.fileno()).st_size
+        except (AttributeError, io.UnsupportedOperation, OSError):
+            pass
+        with self._lock:
+            pos = fh.tell()
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(pos)
+        return size
 
     @property
     def writable(self) -> bool:
@@ -4756,6 +4786,38 @@ class CziDirectoryEntryDV:
         if fallback.SID == CziSubBlockSegmentData.SID:
             return cast(CziSubBlockSegmentData, fallback)
         return cast(CziDeletedSegmentData, fallback)
+
+    def asimage(
+        self,
+        parent: CziFile,
+        /,
+        *,
+        squeeze: bool = True,
+        pixeltype: CziPixelType | None = None,
+        storedsize: bool = False,
+    ) -> CziImage:
+        """Return CziImage for this single directory entry.
+
+        Parameters:
+            parent:
+                CziFile instance providing file access.
+            squeeze:
+                If true, remove dimensions of length 1.
+            pixeltype:
+                Output pixel type override.
+                If ``None``, use the pixel type of this entry.
+            storedsize:
+                Return pixel data at stored resolution without resampling.
+
+        """
+        return CziImage(
+            parent,
+            (self,),
+            name=f'DirectoryEntry at {self.offset}',
+            squeeze=squeeze,
+            pixeltype=pixeltype,
+            storedsize=storedsize,
+        )
 
     def __repr__(self) -> str:
         return f'<{self.__class__.__name__} @ {self.offset}>'
