@@ -1,5 +1,9 @@
 # czifile/setup.py
 
+# Copyright (c) Christoph Gohlke
+# SPDX-License-Identifier: BSD-3-Clause
+# See LICENSE file in the project root for details.
+
 """Czifile package Setuptools script."""
 
 import re
@@ -102,7 +106,7 @@ setup(
     python_requires='>=3.12',
     install_requires=[
         'numpy>=2.1',
-        'imagecodecs>=2026.6.6',
+        'imagecodecs>=2026.8.16',
     ],
     extras_require={'all': ['xarray', 'tifffile', 'matplotlib']},
     entry_points={
