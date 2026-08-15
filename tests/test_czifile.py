@@ -29,7 +29,7 @@
 
 """Unittests for the czifile package.
 
-:Version: 2026.6.12
+:Version: 2026.8.16
 
 """
 
@@ -273,6 +273,28 @@ class TestBinaryFile:
             assert fh._mm is None
             assert bytes(fh._read_at(0, 4)) == b'\x00\x01\x02\x03'
 
+    def test_memmap_mmap_object(self):
+        """Test BinaryFile accepts an existing mmap.mmap as file handle."""
+        import mmap as mmap_module
+
+        with open(self.filename, 'rb') as f:
+            mm = mmap_module.mmap(
+                f.fileno(), 0, access=mmap_module.ACCESS_READ
+            )
+        arr = None
+        try:
+            with BinaryFile(mm, memmap=True) as fh:
+                assert fh._mm is mm
+                assert fh._mv is not None
+                assert fh.memmapped
+                assert fh.filesize == 256
+                assert bytes(fh._read_at(0, 4)) == b'\x00\x01\x02\x03'
+                arr = fh._read_array(10, 3, numpy.uint8)
+                assert numpy.array_equal(arr, [10, 11, 12])
+        finally:
+            del arr  # release mmap-backed array before closing mmap
+            mm.close()
+
     @pytest.mark.parametrize('memmap', [False, True])
     def test_read_at(self, memmap):
         """Test _read_at returns bytes or memoryview at offset."""
@@ -282,6 +304,26 @@ class TestBinaryFile:
             assert bytes(data) == b'\x00\x01\x02\x03'
             data = fh._read_at(10, 3)
             assert bytes(data) == b'\x0a\x0b\x0c'
+
+    @pytest.mark.parametrize('memmap', [False, True])
+    def test_read_into(self, memmap):
+        """Test _read_into reads bytes at offset into existing uint8 buffer."""
+        with BinaryFile(self.filename, memmap=memmap) as fh:
+            buf = numpy.empty(4, numpy.uint8)
+            n = fh._read_into(0, buf)
+            assert n == 4
+            assert numpy.array_equal(buf, [0, 1, 2, 3])
+
+            buf = numpy.empty(3, numpy.uint8)
+            n = fh._read_into(10, buf)
+            assert n == 3
+            assert numpy.array_equal(buf, [10, 11, 12])
+
+            # read past end of file returns only available bytes
+            buf = numpy.empty(8, numpy.uint8)
+            n = fh._read_into(252, buf)
+            assert n == 4
+            assert numpy.array_equal(buf[:4], [252, 253, 254, 255])
 
     @pytest.mark.parametrize('memmap', [False, True])
     def test_read_array(self, memmap):
@@ -419,15 +461,15 @@ class TestBinaryFile:
         import threading
 
         with BinaryFile(self.filename) as fh:
-            assert isinstance(fh._lock, contextlib.nullcontext)
+            assert isinstance(fh.lock, contextlib.nullcontext)
             fh.set_lock(True)
-            assert isinstance(fh._lock, type(threading.RLock()))
+            assert isinstance(fh.lock, type(threading.RLock()))
             fh.set_lock(False)
-            assert isinstance(fh._lock, contextlib.nullcontext)
+            assert isinstance(fh.lock, contextlib.nullcontext)
         with BinaryFile(self.filename, memmap=True) as fh:
-            lock_before = fh._lock
+            lock_before = fh.lock
             fh.set_lock(True)
-            assert fh._lock is lock_before
+            assert fh.lock is lock_before
 
     def test_repr(self):
         """Test __repr__ includes class name and file name."""
@@ -1823,6 +1865,13 @@ def test_squeeze():
             115483010048,
         ),
         (
+            'CZIcmd/test_chunked_lz4.czi',
+            CziCompressionType.CHUNKED,
+            (3, 2, 3, 1536, 1536, 3),
+            'uint8',
+            10610736453,
+        ),
+        (
             'SPIM_Compression_101.czi',
             CziCompressionType.SYSTEMRAW,
             (2, 501, 180, 1488),
@@ -1868,7 +1917,7 @@ def test_compression(filename, compression, shape, dtype, checksum):
     if checksum is None:
         assert arr.any()
     else:
-        assert int(arr.sum()) == checksum
+        assert int(arr.sum(dtype=numpy.uint64)) == checksum
 
 
 def test_compression_jpegxr_raw_fallback():
