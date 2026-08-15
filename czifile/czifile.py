@@ -47,7 +47,7 @@ file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.6.12
+:Version: 2026.8.16
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -69,15 +69,20 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.14, 3.14.6, 3.15.0b2 64-bit
-- `Numpy <https://pypi.org/project/numpy>`_ 2.4.6
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.6.6
-- `Xarray <https://pypi.org/project/xarray>`_ 2026.4.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.0 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.6.1 (optional)
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.15, 3.14.7, 3.15.0rc 64-bit
+- `Numpy <https://pypi.org/project/numpy>`_ 2.5.2
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.8.16
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.7.0 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.1 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.8.16 (optional)
 
 Revisions
 ---------
+
+2026.8.16
+
+- Support experimental chunked-extensible compression.
+- Require imagecodecs >= 2026.8.16 for chunked codec.
 
 2026.6.12
 
@@ -181,6 +186,9 @@ specification, which is confidential and does not permit writing CZI files:
     | ZISRAW (CZI) File Format Design Specification Release Version 1.2.2.
     | "CZI 07-2016/CZI-DOC ZEN 2.3/DS_ZISRAW-FileFormat.pdf"
 
+Additional information can be found in the
+`libCZI documentation <https://zeiss.github.io/libczi/>`__.
+
 The ZISRAW format organizes data into typed, length-prefixed segments:
 a file header, image subblocks, XML metadata, and attachments. Each image
 subblock carries pixels for one tile or Z-plane across up to ten logical
@@ -193,7 +201,7 @@ multi-file images and topography images are not supported.
 Some features are untested due to lack of sample files.
 
 Czifile relies on the `imagecodecs <https://pypi.org/project/imagecodecs/>`__
-package for decoding LZW, Zstd, JPEG, and JPEG XR compressed images.
+package for decoding LZW, Zstd, CHUNKED, JPEG, and JPEG XR compressed images.
 
 Other libraries for reading CZI files (all GPL or LGPL licensed):
 `libczi <https://github.com/ZEISS/libczi>`__,
@@ -205,6 +213,19 @@ Other libraries for reading CZI files (all GPL or LGPL licensed):
 
 Examples
 --------
+
+Import functions and classes used in the examples:
+
+>>> from czifile import (
+...     CziCompressionType,
+...     CziFile,
+...     CziImage,
+...     CziSegment,
+...     CziSegmentId,
+...     CziSubBlockDirectorySegmentData,
+...     CziSubBlockSegmentData,
+...     imread,
+... )
 
 Read image data of the first scene from a CZI file as numpy array:
 
@@ -408,7 +429,7 @@ View the images and metadata in a CZI file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.6.12'
+__version__ = '2026.8.16'
 
 __all__ = [
     'CONVERT_PIXELTYPE',
@@ -668,6 +689,7 @@ class BinaryFile:
     _name: str  # name of file or handle
     _close: bool  # file needs to be closed
     _closed: bool  # file is closed
+    _memmap: bool  # open companion files using memmap
     _lock: contextlib.AbstractContextManager[Any]
     _ext: ClassVar[set[str]] = set()  # valid extensions, empty for any
 
@@ -686,6 +708,7 @@ class BinaryFile:
         self._name = 'Unnamed'
         self._close = False
         self._closed = False
+        self._memmap = bool(memmap)
         self._lock = contextlib.nullcontext()
 
         if isinstance(file, (str, os.PathLike)):
@@ -857,6 +880,34 @@ class BinaryFile:
             fh.seek(offset)
             return fh.read(size)
 
+    def _read_into(self, offset: int, buffer: NDArray[numpy.uint8], /) -> int:
+        """Read bytes from file at given offset into existing buffer.
+
+        Parameters:
+            offset: Byte offset from start of file.
+            buffer: Flat, writable uint8 numpy array to read into.
+
+        Returns:
+            Number of bytes read.
+
+        """
+        nbytes = len(buffer)
+        mv = self._mv
+        if mv is not None:
+            n = min(nbytes, max(0, len(mv) - offset))
+            buffer[:n] = numpy.frombuffer(mv[offset : offset + n], numpy.uint8)
+            return n
+
+        fh = self._fh
+        with self._lock:
+            fh.seek(offset)
+            try:
+                return fh.readinto(buffer)  # type: ignore[attr-defined, no-any-return]
+            except (AttributeError, OSError):
+                data = fh.read(nbytes)
+                buffer[:] = numpy.frombuffer(data, numpy.uint8)
+                return len(data)
+
     def _read_array(
         self,
         offset: int,
@@ -886,7 +937,7 @@ class BinaryFile:
             writable:
                 By default, return read-only array from memory-mapped file.
                 Prevents accidental modification of underlying writable file.
-                Has no effect for non-memory-mapped files (always writeable).
+                Has no effect for non-memory-mapped files (always writable).
             truncate:
                 Allow partial reads of array.
                 If None, log error on partial read.
@@ -4337,9 +4388,9 @@ class CziSubBlockSegmentData(CziSegmentData):
             if self.data_size == size:
                 # TODO: report bug in CZI writer
                 image = numpy.frombuffer(data, dtype)
-            elif compression in {5, 6}:
-                # ZSTD: pass itemsize for hilo byte-shuffle unshuffle
-                # and samples for BGR->RGB conversion
+            elif compression in {5, 6, 7}:
+                # ZSTD and CHUNKED: pass itemsize for hilo byte-shuffle
+                # unshuffle and samples for BGR->RGB conversion
                 image = numpy.frombuffer(
                     decode(
                         data,
@@ -4393,7 +4444,7 @@ class CziSubBlockSegmentData(CziSegmentData):
         # detach from file mmap before any in-place modifications
         if decode is None and copy and czifile._mm is not None:
             image = image.copy()
-        if compression not in {1, 4, 5, 6} and pixeltype.samples in {3, 4}:
+        if compression not in {1, 4, 5, 6, 7} and pixeltype.samples in {3, 4}:
             if not image.flags.writeable:
                 image = image.copy()
             # BGR -> RGB or BGRA -> RGBA: swap channels 0 and 2 in-place
@@ -5883,6 +5934,13 @@ class CziCompressionType(enum.IntEnum):
     ZSTDHDR = 6
     """ZStandard with header and shuffle filter."""
 
+    CHUNKED = 7
+    """Chunked extensible compression (experimental)."""
+    # https://zeiss.github.io/libczi/pages/chunked_compression.html
+
+    # JPEGXL = 8
+    # """JPEG XL (undocumented)."""
+
     CAMERARAW = 100  # 100-999
     """Camera specific RAW data."""
 
@@ -5945,6 +6003,8 @@ class CziCompressionType(enum.IntEnum):
                     result = imagecodecs.jpegxr_decode
             case 5 | 6:
                 result = imagecodecs.zstd1_decode
+            case 7:
+                result = imagecodecs.chunked_decode
             case _:
                 result = None
         if result is not None:
