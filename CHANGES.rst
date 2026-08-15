@@ -1,6 +1,11 @@
 Revisions
 =========
 
+2026.8.16
+
+- Support experimental chunked-extensible compression.
+- Require imagecodecs >= 2026.8.16 for chunked codec.
+
 2026.6.12
 
 - Add CziDirectoryEntryDV.asimage convenience method.
