@@ -20,7 +20,7 @@ file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.6.12
+:Version: 2026.8.16
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -42,15 +42,20 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.14, 3.14.6, 3.15.0b2 64-bit
-- `Numpy <https://pypi.org/project/numpy>`_ 2.4.6
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.6.6
-- `Xarray <https://pypi.org/project/xarray>`_ 2026.4.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.0 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.6.1 (optional)
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.15, 3.14.7, 3.15.0rc 64-bit
+- `Numpy <https://pypi.org/project/numpy>`_ 2.5.2
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.8.16
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.7.0 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.1 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.8.16 (optional)
 
 Revisions
 ---------
+
+2026.8.16
+
+- Support experimental chunked-extensible compression.
+- Require imagecodecs >= 2026.8.16 for chunked codec.
 
 2026.6.12
 
@@ -154,6 +159,9 @@ specification, which is confidential and does not permit writing CZI files:
     | ZISRAW (CZI) File Format Design Specification Release Version 1.2.2.
     | "CZI 07-2016/CZI-DOC ZEN 2.3/DS_ZISRAW-FileFormat.pdf"
 
+Additional information can be found in the
+`libCZI documentation <https://zeiss.github.io/libczi/>`__.
+
 The ZISRAW format organizes data into typed, length-prefixed segments:
 a file header, image subblocks, XML metadata, and attachments. Each image
 subblock carries pixels for one tile or Z-plane across up to ten logical
@@ -166,7 +174,7 @@ multi-file images and topography images are not supported.
 Some features are untested due to lack of sample files.
 
 Czifile relies on the `imagecodecs <https://pypi.org/project/imagecodecs/>`__
-package for decoding LZW, Zstd, JPEG, and JPEG XR compressed images.
+package for decoding LZW, Zstd, CHUNKED, JPEG, and JPEG XR compressed images.
 
 Other libraries for reading CZI files (all GPL or LGPL licensed):
 `libczi <https://github.com/ZEISS/libczi>`__,
@@ -178,6 +186,21 @@ Other libraries for reading CZI files (all GPL or LGPL licensed):
 
 Examples
 --------
+
+Import functions and classes used in the examples:
+
+.. code-block:: python
+
+    >>> from czifile import (
+    ...     CziCompressionType,
+    ...     CziFile,
+    ...     CziImage,
+    ...     CziSegment,
+    ...     CziSegmentId,
+    ...     CziSubBlockDirectorySegmentData,
+    ...     CziSubBlockSegmentData,
+    ...     imread,
+    ... )
 
 Read image data of the first scene from a CZI file as numpy array:
 
