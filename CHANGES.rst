@@ -1,6 +1,17 @@
 Revisions
 =========
 
+2026.10.14
+
+- Precompute more CziDirectoryEntryDV attributes.
+- Sanitize attachment file names to prevent path traversal.
+- Fix infinite loops on negative segment and attachment chunk sizes.
+- Fix chained CziImage views discarding ROI.
+- Do not close caller-owned file handles on failed CziFile construction.
+- Add CziImage.subblock_sizes property.
+- Size chunks decode cache by predominant subblock size.
+- Bound number of pending futures in CziImage.asarray.
+
 2026.8.16
 
 - Support experimental chunked-extensible compression.
