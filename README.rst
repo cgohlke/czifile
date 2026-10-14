@@ -14,13 +14,13 @@ with physical axis coordinates, multi-scene merging, per-dimension selection
 by integer, slice, or sequence, chunk-based iteration, and pyramid-level
 access. It handles Fast Airyscan upsampling and PALM downsampling with
 optional stored-resolution output, and assembles FCS and line-scan files from
-T-chunked subblocks. It also supports Zstd and JPEG XR compression, pixel type
-promotion across channels, and direct access to all ZISRAW segments and
-file-level attachments.
+T-chunked subblocks. It also supports Zstd, Chunked, and JPEG XR compression,
+pixel type promotion across channels, and direct access to all ZISRAW segments
+and file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.8.16
+:Version: 2026.10.14
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -31,7 +31,8 @@ Install the czifile package and all dependencies from the
 
     python -m pip install -U czifile[all]
 
-See `Examples`_ for using the programming interface.
+See `Examples`_ and `Documentation <https://www.cgohlke.com/docs/czifile/>`_
+for using the programming interface.
 
 Source code, examples, and support are available on
 `GitHub <https://github.com/cgohlke/czifile>`_.
@@ -42,15 +43,26 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.15, 3.14.7, 3.15.0rc 64-bit
-- `Numpy <https://pypi.org/project/numpy>`_ 2.5.2
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.8.16
-- `Xarray <https://pypi.org/project/xarray>`_ 2026.7.0 (recommended)
-- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.1 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.8.16 (optional)
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.16, 3.14.8, 3.15.0 64-bit
+- `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.10.10
+- `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (recommended)
+- `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.9.20 (optional)
 
 Revisions
 ---------
+
+2026.10.14
+
+- Precompute more CziDirectoryEntryDV attributes.
+- Sanitize attachment file names to prevent path traversal.
+- Fix infinite loops on negative segment and attachment chunk sizes.
+- Fix chained CziImage views discarding ROI.
+- Do not close caller-owned file handles on failed CziFile construction.
+- Add CziImage.subblock_sizes property.
+- Size chunks decode cache by predominant subblock size.
+- Bound number of pending futures in CziImage.asarray.
 
 2026.8.16
 
@@ -286,6 +298,10 @@ Iterate image chunks:
     ...     # keep C, tile spatially
     ...     for chunk in img.chunks(C=None, Y=256, X=256):
     ...         assert chunk.dims[0] == 'C'
+    ...
+    ...     # align spatial chunks with stored subblocks
+    ...     assert img.subblock_sizes == {'Y': 256, 'X': 256}
+    ...     chunks = img.chunks(**img.subblock_sizes)
     ...
 
 Read image as xarray DataArray with physical coordinates and attributes:
