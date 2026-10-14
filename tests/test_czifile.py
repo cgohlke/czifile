@@ -29,7 +29,7 @@
 
 """Unittests for the czifile package.
 
-:Version: 2026.8.16
+:Version: 2026.10.14
 
 """
 
@@ -50,9 +50,11 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy
 import pytest
 import tifffile
+from numpy import array_equal
 
-# NOTE: ``assert numpy.array_equal`` much faster than ``assert_array_equal``
+# NOTE: ``assert array_equal`` much faster than ``assert_array_equal``
 # from numpy.testing import assert_array_equal
+
 
 try:
     import fsspec
@@ -85,6 +87,7 @@ from czifile import (
 from czifile.czifile import (
     BinaryFile,
     DecodeCache,
+    asbool,
     default_maxworkers,
     match_filename,
 )
@@ -290,7 +293,7 @@ class TestBinaryFile:
                 assert fh.filesize == 256
                 assert bytes(fh._read_at(0, 4)) == b'\x00\x01\x02\x03'
                 arr = fh._read_array(10, 3, numpy.uint8)
-                assert numpy.array_equal(arr, [10, 11, 12])
+                assert array_equal(arr, [10, 11, 12])
         finally:
             del arr  # release mmap-backed array before closing mmap
             mm.close()
@@ -312,18 +315,18 @@ class TestBinaryFile:
             buf = numpy.empty(4, numpy.uint8)
             n = fh._read_into(0, buf)
             assert n == 4
-            assert numpy.array_equal(buf, [0, 1, 2, 3])
+            assert array_equal(buf, [0, 1, 2, 3])
 
             buf = numpy.empty(3, numpy.uint8)
             n = fh._read_into(10, buf)
             assert n == 3
-            assert numpy.array_equal(buf, [10, 11, 12])
+            assert array_equal(buf, [10, 11, 12])
 
             # read past end of file returns only available bytes
             buf = numpy.empty(8, numpy.uint8)
             n = fh._read_into(252, buf)
             assert n == 4
-            assert numpy.array_equal(buf[:4], [252, 253, 254, 255])
+            assert array_equal(buf[:4], [252, 253, 254, 255])
 
     @pytest.mark.parametrize('memmap', [False, True])
     def test_read_array(self, memmap):
@@ -332,9 +335,9 @@ class TestBinaryFile:
         with BinaryFile(self.filename, memmap=memmap) as fh:
             arr = fh._read_array(0, 4, dtype)
             assert arr.dtype == dtype
-            assert numpy.array_equal(arr, [0, 1, 2, 3])
+            assert array_equal(arr, [0, 1, 2, 3])
             arr = fh._read_array(10, 3, dtype)
-            assert numpy.array_equal(arr, [10, 11, 12])
+            assert array_equal(arr, [10, 11, 12])
             if memmap:
                 assert not arr.flags.writeable
                 arr_copy = fh._read_array(0, 4, dtype, copy=True)
@@ -343,12 +346,10 @@ class TestBinaryFile:
             else:
                 # multi-byte dtype: binary.bin bytes as uint16 LE pairs
                 arr16 = fh._read_array(0, 4, numpy.dtype('<u2'))
-                assert numpy.array_equal(
-                    arr16, [0x0100, 0x0302, 0x0504, 0x0706]
-                )
+                assert array_equal(arr16, [0x0100, 0x0302, 0x0504, 0x0706])
             # count=-1 reads to end of file
             arr_end = fh._read_array(252, -1, dtype)
-            assert numpy.array_equal(arr_end, [252, 253, 254, 255])
+            assert array_equal(arr_end, [252, 253, 254, 255])
 
     def test_read_array_writable_memmap(self, tmp_path):
         """Test  writable=False makes mmap RO; writable=True keeps it RW."""
@@ -374,7 +375,7 @@ class TestBinaryFile:
         with BinaryFile(io.BytesIO(bytes(range(5)))) as fh:
             arr = fh._read_array(0, 10, numpy.uint8, truncate=True)
             assert len(arr) == 5
-            assert numpy.array_equal(arr, [0, 1, 2, 3, 4])
+            assert array_equal(arr, [0, 1, 2, 3, 4])
         logger = BinaryFile.__module__.split('.')[0]
         with (
             BinaryFile(io.BytesIO(bytes(range(5)))) as fh,
@@ -393,7 +394,7 @@ class TestBinaryFile:
         with BinaryFile(tmpfile, memmap=True) as fh:
             arr = fh._read_array(0, 4, dtype, truncate=True)
             assert len(arr) == 3
-            assert numpy.array_equal(arr, [1, 2, 3])
+            assert array_equal(arr, [1, 2, 3])
             # truncate=False must raise even on mmap path
             with pytest.raises(ValueError, match='expected 4 items, got 3'):
                 fh._read_array(0, 4, dtype, truncate=False)
@@ -556,7 +557,7 @@ class TestCziFile:
         with CziFile(self.filename, memmap=True) as czi:
             assert czi._mm is not None
             data = czi.scenes[0].asarray()
-        assert numpy.array_equal(data, ref)
+        assert array_equal(data, ref)
 
     def test_memmap_bytesio_ignored(self):
         """Test CziFile memmap=True is silently ignored for BytesIO."""
@@ -577,7 +578,7 @@ class TestCziFile:
         with CziFile(tmpfile, mode='r+', memmap=True) as czi:
             assert czi._mm is not None
             data = czi.scenes[0].asarray()
-        assert numpy.array_equal(data, ref)
+        assert array_equal(data, ref)
 
 
 @pytest.mark.parametrize('memmap', [False, True])
@@ -673,7 +674,7 @@ def test_czi(memmap):
         img = de.asimage(czi, storedsize=True)
         assert img.storedsize is True
         assert img.shape == img.shape
-        assert numpy.array_equal(img.asarray(), arr)
+        assert array_equal(img.asarray(), arr)
 
         # filtered_subblock_directory
         fsd = czi.filtered_subblock_directory
@@ -846,6 +847,7 @@ def test_czi(memmap):
 
         # bbox: (x, y, width, height) in global CZI coordinates
         assert img.bbox == (0, 0, 312, 181)
+        assert img.subblock_sizes == {'Y': 181, 'X': 312}
 
         # coords, coord_units, coord_offsets, coord_scales, and attrs
         assert isinstance(img.coords, Mapping)
@@ -955,7 +957,7 @@ def test_imread():
     im = imread(filename, memmap=True, out=out)
     assert numpy.shares_memory(im, out)
     assert im.flags.c_contiguous
-    assert out.sum() > 0
+    assert out.sum(dtype=numpy.uint64) > 0
 
     # out=ndarray with reordering selection: contiguous, no copy
     with CziFile(filename) as czi:
@@ -994,11 +996,11 @@ def test_imread_scene_default():
 
     # slice(4, 5) selects S-coords in {4} -> same result as scene=4
     im_slice = imread(filename, scene=slice(4, 5))
-    assert numpy.array_equal(im_slice, im)
+    assert array_equal(im_slice, im)
 
     # slice(4, 10) covers S in {4..9} -> S=4 is included; same result
     im_wide = imread(filename, scene=slice(4, 10))
-    assert numpy.array_equal(im_wide, im)
+    assert array_equal(im_wide, im)
 
     # slice(0, 4) covers S in {0,1,2,3} -> file has no such scene
     with pytest.raises(KeyError):
@@ -1016,7 +1018,7 @@ def test_imread_scene_sequence():
         im_list1 = czi.asarray(scene=[1])
         im_scalar1 = czi.asarray(scene=1)
         assert im_list1.shape == im_scalar1.shape
-        assert numpy.array_equal(im_list1, im_scalar1)
+        assert array_equal(im_list1, im_scalar1)
 
         # two-scene sequence merges scenes 0 and 1 into one bounding box
         im_01 = czi.asarray(scene=[0, 1])
@@ -1024,11 +1026,11 @@ def test_imread_scene_sequence():
 
         # result equals what czi.scenes(scene=[0, 1]) returns
         ref_01 = czi.scenes(scene=[0, 1]).asarray()
-        assert numpy.array_equal(im_01, ref_01)
+        assert array_equal(im_01, ref_01)
 
     # also reachable via imread()
     im_imread = imread(filename, scene=[0, 1])
-    assert numpy.array_equal(im_imread, im_01)
+    assert array_equal(im_imread, im_01)
 
 
 def test_directory_entry_dimension_entries():
@@ -1149,7 +1151,7 @@ def test_subblock_data_copy():
         # copy=False: mmap-backed uncompressed tile is a borrowed view
         tile_view = sb.data(copy=False)
         assert not tile_view.flags.owndata
-        assert numpy.array_equal(tile, tile_view)
+        assert array_equal(tile, tile_view)
 
     # tile must remain readable after the file is closed
     _ = tile.sum()
@@ -1159,7 +1161,7 @@ def test_subblock_data_copy():
         sb = next(iter(czi.subblocks()))
         tile_no_mmap = sb.data()
         tile_no_copy = sb.data(copy=False)
-        assert numpy.array_equal(tile_no_mmap, tile_no_copy)
+        assert array_equal(tile_no_mmap, tile_no_copy)
 
 
 def test_subblock_metadata_parallel():
@@ -1200,11 +1202,11 @@ def test_asarray_parallel_memmap():
     with CziFile(filename, memmap=True) as czi:
         assert czi._mm is not None
         arr = czi.scenes[1].asarray(maxworkers=1)
-    assert numpy.array_equal(arr, ref)
+    assert array_equal(arr, ref)
 
     with CziFile(filename, memmap=True) as czi:
         arr_parallel = czi.scenes[1].asarray(maxworkers=8)
-    assert numpy.array_equal(arr_parallel, ref)
+    assert array_equal(arr_parallel, ref)
 
 
 @pytest.mark.parametrize(
@@ -1229,6 +1231,67 @@ def test_match_filename_invalid():
     """Test match_filename raises ValueError for non-CZI file names."""
     with pytest.raises(ValueError, match='not a CZI'):
         match_filename('foo.tif')
+
+
+def test_asbool():
+    """Test asbool matches complete tokens only."""
+    assert asbool(b' True ') is True
+    assert asbool(b'false') is False
+    assert asbool('TRUE') is True
+    assert asbool('false') is False
+    for value in (b't', b'rue', b'f', b'als', b'', 't', ''):
+        with pytest.raises(TypeError):
+            asbool(value)
+
+
+def test_attachment_filename_sanitized():
+    """Test attachment file name cannot escape output directory."""
+    data = struct.pack(
+        '<2s10sqi16s8s80s',
+        b'A1',
+        b'',
+        1234,
+        0,
+        bytes(16),
+        b'CZI',
+        b'../..\\x:y*?"<>|\x01name',
+    )
+    entry = CziAttachmentEntryA1(data, 0)
+    assert entry.name == '../..\\x:y*?"<>|\x01name'
+    assert entry.filename == '.._.._x_y_______name@1234.czi'
+    assert os.path.basename(entry.filename) == entry.filename
+
+
+def test_not_czi_keeps_stream_open():
+    """Test failed CziFile construction does not close caller stream."""
+    buf = io.BytesIO(b'NOTACZIFILE' + bytes(512))
+    with pytest.raises(CziFileError):
+        CziFile(buf)
+    assert not buf.closed
+
+
+def test_negative_segment_size():
+    """Test negative segment size raises instead of looping forever."""
+    filename = DATA / 'Test.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    data = bytearray(filename.read_bytes())
+    # patch allocated size of segment following file header
+    offset = 32 + struct.unpack_from('<q', data, 16)[0]
+    struct.pack_into('<q', data, offset + 16, -32)
+    with (
+        CziFile(io.BytesIO(bytes(data))) as czi,
+        pytest.raises(CziFileError, match='invalid ZISRAW segment'),
+    ):
+        list(czi.segments())
+
+    # patch allocated size of file header
+    struct.pack_into('<q', data, 16, -32)
+    buf = io.BytesIO(bytes(data))
+    with pytest.raises(CziFileError, match='Failed to read CZI file header'):
+        CziFile(buf)
+    assert not buf.closed
 
 
 def test_update_pending():
@@ -1396,7 +1459,7 @@ def test_attachments_parallel():
                 results = list(executor.map(lambda a: a.data(), att_list))
         for ref_data, result in zip(ref, results, strict=True):
             if isinstance(ref_data, numpy.ndarray):
-                assert numpy.array_equal(result, ref_data)
+                assert array_equal(result, ref_data)
             else:
                 assert result == ref_data
 
@@ -1478,6 +1541,7 @@ def test_palm_superresolution():
         assert image.is_upsampled is False
         assert image.is_pyramid_level is False
         assert image.is_downsampled is True
+        assert image.subblock_sizes == {'Y': 512, 'X': 512}
         e = image.directory_entries[0]
         assert e.stored_shape[-3:-1] == (1206, 1206)
         assert e.shape[-3:-1] == (512, 512)
@@ -1488,13 +1552,13 @@ def test_palm_superresolution():
         ome_path = filename.with_suffix('').with_suffix('.ome.tiff')
         if ome_path.exists():
             expected = tifffile.imread(ome_path).astype(numpy.uint16)
-            assert numpy.array_equal(arr, expected)
+            assert array_equal(arr, expected)
         # chunks interface must match asarray: chunk asarray must downsample
         # the stored 1206x1206 tile to the logical 512x512 output
         plane = next(iter(image.chunks())).asarray()
         assert plane.shape == (512, 512)
         assert plane.dtype == numpy.uint16
-        assert numpy.array_equal(plane, arr)
+        assert array_equal(plane, arr)
 
 
 def test_palm_drift():
@@ -1530,18 +1594,18 @@ def test_palm_drift():
         ome_path = filename.with_suffix('').with_suffix('.ome.tiff')
         if ome_path.exists():
             expected = tifffile.imread(str(ome_path)).astype(numpy.uint16)
-            assert numpy.array_equal(arr, expected)
+            assert array_equal(arr, expected)
         # chunks interface must match asarray for both tiles:
         # C=0 is stored at full res (256x256), C=1 must be downsampled
         # from stored 2560x2560 to logical 256x256
         plane_c0 = next(iter(image(C=0).chunks())).asarray()
         assert plane_c0.shape == (256, 256)
         assert plane_c0.dtype == numpy.uint16
-        assert numpy.array_equal(plane_c0, arr[0])
+        assert array_equal(plane_c0, arr[0])
         plane_c1 = next(iter(image(C=1).chunks())).asarray()
         assert plane_c1.shape == (256, 256)
         assert plane_c1.dtype == numpy.uint16
-        assert numpy.array_equal(plane_c1, arr[1])
+        assert array_equal(plane_c1, arr[1])
 
 
 def test_timestamps():
@@ -1750,10 +1814,10 @@ def test_roi_larger_than_image():
         arr = big.asarray()
         assert arr.shape == (1024, 1024)
         # pixels outside the actual 312x181 extent must be zero
-        assert int(arr[:, 312:].sum()) == 0
-        assert int(arr[181:, :].sum()) == 0
+        assert int(arr[:, 312:].sum(dtype=numpy.uint64)) == 0
+        assert int(arr[181:, :].sum(dtype=numpy.uint64)) == 0
         # pixels inside the extent are non-zero (image has data there)
-        assert int(arr[:181, :312].sum()) > 0
+        assert int(arr[:181, :312].sum(dtype=numpy.uint64)) > 0
 
         # coord_offsets/coords reflect the ROI corner, not pixel 0
         # pixel size for Test.czi is ~8.303e-7 m
@@ -1764,6 +1828,21 @@ def test_roi_larger_than_image():
         assert roi_img.coord_offsets['Y'] == pytest.approx(20 * scale)
         assert float(roi_img.coords['X'][0]) == pytest.approx(10 * scale)
         assert float(roi_img.coords['Y'][0]) == pytest.approx(20 * scale)
+
+
+def test_roi_chained():
+    """Test chained CziImage view preserves existing ROI."""
+    filename = DATA / 'Test.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        roi_img = czi.scenes[0](C=0, Z=0, roi=(10, 20, 80, 40))
+        chained = roi_img(pixeltype=roi_img.pixeltype)
+        assert chained is not roi_img
+        assert chained.sizes == {'Y': 40, 'X': 80}
+        assert chained.start == (20, 10)
+        assert array_equal(chained.asarray(), roi_img.asarray())
 
 
 def test_fillvalue():
@@ -1782,29 +1861,29 @@ def test_fillvalue():
         # scalar fillvalue=0: uncovered region must be zero
         arr0 = img.asarray(fillvalue=0)
         assert arr0.shape == (512, 512, 3)
-        assert int(arr0[:, 256:, :].sum()) == 0
-        assert int(arr0[256:, :, :].sum()) == 0
+        assert int(arr0[:, 256:, :].sum(dtype=numpy.uint64)) == 0
+        assert int(arr0[256:, :, :].sum(dtype=numpy.uint64)) == 0
 
         # BGR triplet fillvalue: uncovered region must equal the triplet
         arr_bgr = img.asarray(fillvalue=bgr_fill)
-        assert numpy.array_equal(
+        assert array_equal(
             arr_bgr[:, 256:, :],
             numpy.full((512, 256, 3), bgr_fill, dtype=arr_bgr.dtype),
         )
-        assert numpy.array_equal(
+        assert array_equal(
             arr_bgr[256:, :, :],
             numpy.full((256, 512, 3), bgr_fill, dtype=arr_bgr.dtype),
         )
 
         # covered region is unaffected by fillvalue
-        assert numpy.array_equal(arr0[:256, :256, :], arr_bgr[:256, :256, :])
+        assert array_equal(arr0[:256, :256, :], arr_bgr[:256, :256, :])
 
         # fillvalue=None with pre-allocated array: uncovered pixels untouched
         pre = numpy.full((512, 512, 3), 99, dtype=arr0.dtype)
         img.asarray(out=pre, fillvalue=None)
         assert int(pre[:, 256:, :].min()) == 99
         assert int(pre[256:, :, :].min()) == 99
-        assert numpy.array_equal(pre[:256, :256, :], arr0[:256, :256, :])
+        assert array_equal(pre[:256, :256, :], arr0[:256, :256, :])
 
 
 def test_squeeze():
@@ -1950,7 +2029,7 @@ def test_compression_jpegxr_raw_fallback():
         data = buggy[0].data()
         assert data.shape == (1, 2040, 2040, 1)
         assert data.dtype == numpy.uint16
-        assert int(data.sum()) == 1087553117
+        assert int(data.sum(dtype=numpy.uint64)) == 1087553117
 
         # verify full image composites correctly
         arr = czi.asarray()
@@ -2113,14 +2192,14 @@ def test_pixeltype_conversions():
         expected_g8 = (
             arr_bgr[..., :3].sum(axis=-1, dtype=numpy.float32) / 3.0
         ).astype(numpy.uint8)
-        assert numpy.array_equal(arr_g8, expected_g8)
-        assert int(arr_g8.sum()) == 2290374
+        assert array_equal(arr_g8, expected_g8)
+        assert int(arr_g8.sum(dtype=numpy.uint64)) == 2290374
 
         # BGR24 -> BGRA32: BGR copied, alpha channel opaque (255)
         arr_bgra = img_bgr(pixeltype=CziPixelType.BGRA32).asarray()
         assert arr_bgra.dtype == numpy.dtype('uint8')
         assert arr_bgra.shape == (256, 256, 4)
-        assert numpy.array_equal(arr_bgra[..., :3], arr_bgr)
+        assert array_equal(arr_bgra[..., :3], arr_bgr)
         assert numpy.all(arr_bgra[..., 3] == 255)
 
         # BGR24 -> GRAY32FLOAT: mean of 3 channels as float32
@@ -2140,9 +2219,9 @@ def test_pixeltype_conversions():
         arr_g_bgr = img_c0(pixeltype=CziPixelType.BGR24).asarray()
         assert arr_g_bgr.dtype == numpy.dtype('uint8')
         assert arr_g_bgr.shape == (256, 256, 3)
-        assert numpy.array_equal(arr_g_bgr[:, :, 0], arr_g)
-        assert numpy.array_equal(arr_g_bgr[:, :, 1], arr_g)
-        assert numpy.array_equal(arr_g_bgr[:, :, 2], arr_g)
+        assert array_equal(arr_g_bgr[:, :, 0], arr_g)
+        assert array_equal(arr_g_bgr[:, :, 1], arr_g)
+        assert array_equal(arr_g_bgr[:, :, 2], arr_g)
 
         # GRAY16 -> BGR24: >> 8 to fit uint8, tiled into all three channels
         img_c1 = img(C=1)
@@ -2152,9 +2231,9 @@ def test_pixeltype_conversions():
         assert arr16_bgr.dtype == numpy.dtype('uint8')
         assert arr16_bgr.shape == (256, 256, 3)
         expected_ch = (arr16 >> 8).astype(numpy.uint8)
-        assert numpy.array_equal(arr16_bgr[:, :, 0], expected_ch)
-        assert numpy.array_equal(arr16_bgr[:, :, 1], expected_ch)
-        assert numpy.array_equal(arr16_bgr[:, :, 2], expected_ch)
+        assert array_equal(arr16_bgr[:, :, 0], expected_ch)
+        assert array_equal(arr16_bgr[:, :, 1], expected_ch)
+        assert array_equal(arr16_bgr[:, :, 2], expected_ch)
 
 
 def test_storedsize_regular():
@@ -2182,13 +2261,13 @@ def test_storedsize_regular():
         assert arr.shape == img.shape
         # data must be identical to non-storedsize read
         expected = img.asarray()
-        assert numpy.array_equal(arr, expected)
+        assert array_equal(arr, expected)
 
         # chunks interface: same shape, same data
         plane_ss = next(iter(ss.chunks())).asarray()
         plane_normal = next(iter(img.chunks())).asarray()
         assert plane_ss.shape == plane_normal.shape
-        assert numpy.array_equal(plane_ss, plane_normal)
+        assert array_equal(plane_ss, plane_normal)
 
         # repr includes storedsize indicator
         assert 'storedsize' in repr(ss)
@@ -2212,13 +2291,14 @@ def test_storedsize_airyscan():
         assert c0_ss.is_upsampled is True
         assert c0_ss.is_downsampled is False
         assert c0_ss.shape == (32, 128)
+        assert c0_ss.subblock_sizes == {'Y': 32, 'X': 128}
         arr_c0 = c0_ss.asarray()
         assert arr_c0.shape == (32, 128)
 
         # chunks interface returns stored size too
         plane_c0 = next(iter(c0_ss.chunks())).asarray()
         assert plane_c0.shape == (32, 128)
-        assert numpy.array_equal(plane_c0, arr_c0)
+        assert array_equal(plane_c0, arr_c0)
 
         # C=1 is full-resolution (128x128 stored).
         # storedsize does not change output shape.
@@ -2227,7 +2307,7 @@ def test_storedsize_airyscan():
         assert c1_ss.is_downsampled is False
         assert c1_ss.shape == (128, 128)
         c1_normal = img(H=0, T=0, C=1)
-        assert numpy.array_equal(c1_ss.asarray(), c1_normal.asarray())
+        assert array_equal(c1_ss.asarray(), c1_normal.asarray())
 
 
 def test_storedsize_airyscan_nonuniform_raises():
@@ -2262,6 +2342,7 @@ def test_storedsize_palm():
         assert ss.is_pyramid_level is False
         # stored size is 1206x1206 (larger than logical 512x512)
         assert ss.shape == (1206, 1206)
+        assert ss.subblock_sizes == {'Y': 1206, 'X': 1206}
 
         arr = ss.asarray()
         assert arr.shape == (1206, 1206)
@@ -2270,7 +2351,7 @@ def test_storedsize_palm():
         # chunks interface returns stored size too
         plane = next(iter(ss.chunks())).asarray()
         assert plane.shape == (1206, 1206)
-        assert numpy.array_equal(plane, arr)
+        assert array_equal(plane, arr)
 
 
 def test_storedsize_palm_nonuniform_raises():
@@ -2312,7 +2393,7 @@ def test_storedsize_palm_per_channel():
         arr_c1 = c1.asarray()
         assert arr_c1.shape == (256, 256)
         # no-op: data same as without storedsize
-        assert numpy.array_equal(arr_c1, img(C=1).asarray())
+        assert array_equal(arr_c1, img(C=1).asarray())
 
 
 def test_storedsize_pyramid():
@@ -2343,7 +2424,7 @@ def test_storedsize_pyramid():
         assert lv7_ss.shape == lv7.shape
         arr_ss = lv7_ss.asarray()
         arr_normal = lv7.asarray()
-        assert numpy.array_equal(arr_ss, arr_normal)
+        assert array_equal(arr_ss, arr_normal)
 
 
 def test_storedsize_inheritance():
@@ -2483,7 +2564,7 @@ def test_chunks():
         planes = list(sub.chunks())
         assert len(planes) == 21
         assembled = numpy.stack([c.asarray() for c in planes])
-        assert numpy.array_equal(assembled, full)
+        assert array_equal(assembled, full)
 
         # error: unknown dimension
         with pytest.raises(ValueError, match='unknown dimension'):
@@ -2572,6 +2653,55 @@ def test_chunks_multitile():
         assert c_first.asarray().shape == (2048, 2048)
 
 
+@pytest.mark.parametrize(
+    ('name', 'sizes', 'level_sizes', 'maxcache'),
+    [
+        (
+            'Raw_Tiles_small_1channels.czi',
+            {'Y': 2048, 'X': 2048},
+            {'Y': 1024, 'X': 1024},
+            4,
+        ),
+        # edge tiles (1200, 1291) and (837, 1302) differ from grid tiles
+        (
+            'AxioScan_Test.czi',
+            {'Y': 1200, 'X': 1600},
+            {'Y': 729, 'X': 729},
+            4,
+        ),
+        # strip entries of width 1 must not win over full tiles
+        ('Gland_1x_3substack.czi', {'Y': 1920, 'X': 1920}, None, 4),
+        # line scans: subblocks extend along Z or T
+        (
+            'Zenodo-10577621/LineScan_Z200.czi',
+            {'Z': 200, 'Y': 1, 'X': 512},
+            None,
+            1,
+        ),
+        ('XTscan.czi', {'T': 13000, 'Y': 1, 'X': 512}, None, 1),
+    ],
+)
+def test_subblock_sizes(name, sizes, level_sizes, maxcache):
+    """Test CziImage.subblock_sizes returns predominant subblock sizes."""
+    filename = DATA / name
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        img = czi.scenes[0]
+        assert img.subblock_sizes == sizes
+        if level_sizes is not None:
+            # pyramid levels report stored (output) sizes
+            assert img.levels[1].subblock_sizes == level_sizes
+        # sizes can be passed directly to chunks
+        chunks = img.chunks(**img.subblock_sizes)
+        assert chunks._maxcache == maxcache
+        if 'Y' in sizes and sizes['Y'] == 1:
+            # whole line scan fits in one chunk
+            assert len(chunks) == 1
+            assert array_equal(next(iter(chunks)).asarray(), img.asarray())
+
+
 def test_pyramid():
     """Test multi-level pyramidal image."""
     filename = DATA / 'CZI-samples/Axio Scan.Z1/Kidney_40x_z_stack.czi'
@@ -2639,6 +2769,10 @@ def test_pyramid():
         for level, expected in zip(img.levels, expected_shapes, strict=True):
             assert level.shape == expected
 
+        # level 0 reports logical shape, pyramid levels stored shape
+        assert img.subblock_sizes == {'Y': 1200, 'X': 1600}
+        assert img.levels[7].subblock_sizes == {'Y': 247, 'X': 654}
+
         lv7 = img.levels[7]
         arr7 = lv7.asarray()
         assert arr7.shape == lv7.shape
@@ -2690,7 +2824,7 @@ def test_pyramid_level_isolation():
         assert arr7.shape == lv7.shape
 
         # asarray is deterministic: repeated call returns identical data
-        assert numpy.array_equal(lv7.asarray(), arr7)
+        assert array_equal(lv7.asarray(), arr7)
 
 
 def test_pyramid_tiles_mislabelled():
@@ -2866,7 +3000,7 @@ def test_pyramid_roi():
         expected = full[:, sy : sy + sh, sx : sx + sw]
 
         assert roi_arr.shape == expected.shape
-        assert numpy.array_equal(roi_arr, expected)
+        assert array_equal(roi_arr, expected)
 
 
 def test_mixed_dimension_sets():
@@ -2897,7 +3031,7 @@ def test_mixed_dimension_sets():
         arr = czi.asarray(maxworkers=1)
         assert arr.shape == (3, 2, 51, 1920, 1920)
         assert arr.dtype == numpy.dtype('uint16')
-        assert int(arr.sum()) == 443993255740
+        assert int(arr.sum(dtype=numpy.uint64)) == 443993255740
 
 
 def test_multifile_series_missing_parts():
@@ -2991,6 +3125,7 @@ def test_point_time_series():
         assert sc.dims == ('T', 'X')
         assert sc.shape == (80000, 500)
         assert sc.dtype == numpy.dtype('uint8')
+        assert sc.subblock_sizes == {'T': 80000, 'Y': 1, 'X': 500}
 
         # one level, no sub-resolution pyramid
         assert len(sc.levels) == 1
@@ -3000,7 +3135,7 @@ def test_point_time_series():
         arr = sc.asarray()
         assert arr.shape == sc.shape
         assert arr.dtype == numpy.dtype('uint8')
-        assert int(arr.sum()) == 16002180
+        assert int(arr.sum(dtype=numpy.uint64)) == 16002180
 
         # five attachments:
         # # Thumbnail, LookupTables, TimeStamps, EventList, Image
@@ -3066,6 +3201,7 @@ def test_scanning_fcs():
         assert sc.dims == ('T', 'X')
         assert sc.shape == (204920, 128)
         assert sc.dtype == numpy.dtype('uint16')
+        assert sc.subblock_sizes == {'T': 100, 'Y': 1, 'X': 128}
 
         # no resampling
         assert not sc.is_pyramid
@@ -3079,7 +3215,7 @@ def test_scanning_fcs():
         arr = sc.asarray()
         assert arr.shape == sc.shape
         assert arr.dtype == numpy.dtype('uint16')
-        assert int(arr.sum()) == 9018413
+        assert int(arr.sum(dtype=numpy.uint64)) == 9018413
 
         # three attachments: EventList, TimeStamps, Thumbnail
         att_names = {ae.name for ae in czi.attachment_directory}
@@ -3486,6 +3622,8 @@ def test_airyscan_fastscan():
         assert img.is_upsampled is True
         assert img.is_pyramid_level is False
         assert img.is_downsampled is False
+        # logical, not stored
+        assert img.subblock_sizes == {'Y': 128, 'X': 128}
 
         # read a single H=0, T=0 plane (both channels) to keep I/O small
         frame = img(H=0, T=0).asarray()
@@ -3493,11 +3631,11 @@ def test_airyscan_fastscan():
         assert frame.shape == (2, 128, 128)
         assert frame.dtype == numpy.dtype('uint8')
         # C=0: stored 32 rows, upsampled to 128 - data must reach row 32+
-        assert int((frame[0, 32:] != 0).sum()) > 0
+        assert int((frame[0, 32:] != 0).sum(dtype=numpy.uint64)) > 0
         # each group of 4 consecutive rows must be identical (repeat pattern)
         for base in range(0, 128, 4):
-            assert numpy.array_equal(frame[0, base], frame[0, base + 1])
-            assert numpy.array_equal(frame[0, base], frame[0, base + 3])
+            assert array_equal(frame[0, base], frame[0, base + 1])
+            assert array_equal(frame[0, base], frame[0, base + 3])
         # C=1 is full-resolution (128 rows stored); no special handling needed
         assert frame[1].shape == (128, 128)
 
@@ -3507,15 +3645,15 @@ def test_airyscan_fastscan():
         # chaining, which is not permitted
         plane_c0 = next(iter(img(H=0, T=0, C=0).chunks())).asarray()
         assert plane_c0.shape == (128, 128)
-        assert int((plane_c0[32:] != 0).sum()) > 0
+        assert int((plane_c0[32:] != 0).sum(dtype=numpy.uint64)) > 0
         for base in range(0, 128, 4):
-            assert numpy.array_equal(plane_c0[base], plane_c0[base + 1])
-            assert numpy.array_equal(plane_c0[base], plane_c0[base + 3])
+            assert array_equal(plane_c0[base], plane_c0[base + 1])
+            assert array_equal(plane_c0[base], plane_c0[base + 3])
         plane_c1 = next(iter(img(H=0, T=0, C=1).chunks())).asarray()
         assert plane_c1.shape == (128, 128)
         # chunks result matches asarray result
-        assert numpy.array_equal(plane_c0, frame[0])
-        assert numpy.array_equal(plane_c1, frame[1])
+        assert array_equal(plane_c0, frame[0])
+        assert array_equal(plane_c1, frame[1])
 
 
 def test_multiscene_mosaic():
@@ -3547,6 +3685,7 @@ def test_multiscene_mosaic():
         assert sc0.dims == ('T', 'C', 'Z', 'Y', 'X')
         assert sc0.shape == (2, 2, 3, 486, 1178)
         assert sc0.dtype == numpy.dtype('uint16')
+        assert sc0.subblock_sizes == {'Y': 256, 'X': 256}
 
         assert sc1.dims == ('T', 'C', 'Z', 'Y', 'X')
         assert sc1.shape == (2, 2, 3, 256, 256)
@@ -3582,10 +3721,10 @@ def test_multiscene_mosaic():
 
         # asarray checksums
         arr0 = sc0.asarray(maxworkers=1)
-        assert int(arr0.sum()) == 7772223062
+        assert int(arr0.sum(dtype=numpy.uint64)) == 7772223062
 
         arr1 = sc1.asarray(maxworkers=1)
-        assert int(arr1.sum()) == 699256173
+        assert int(arr1.sum(dtype=numpy.uint64)) == 699256173
 
         # sc1 coords: T in seconds, C as channel names, Z/Y/X in metres
         coords = sc1.coords
@@ -3605,14 +3744,14 @@ def test_multiscene_mosaic():
         assert 'C' not in units
 
         arr2 = sc2.asarray(maxworkers=1)
-        assert int(arr2.sum()) == 12769120769
+        assert int(arr2.sum(dtype=numpy.uint64)) == 12769120769
 
         # CziImage() dimension selection
         sub = sc0(T=0, C=0)
         assert sub.dims == ('Z', 'Y', 'X')
         assert sub.shape == (3, 486, 1178)
         arr_sub = sub.asarray(maxworkers=1)
-        assert int(arr_sub.sum()) == 1939165033
+        assert int(arr_sub.sum(dtype=numpy.uint64)) == 1939165033
 
         # squeezing both T and C leaves only Z/Y/X in coords
         c_sub = sub.coords
@@ -3626,13 +3765,15 @@ def test_multiscene_mosaic():
         assert len(chunks) == 12
         chunk_list = list(chunks)
         assert chunk_list[0].asarray().shape == (256, 256)
-        assert int(chunk_list[0].asarray().sum()) == 62403914
-        assert int(chunk_list[-1].asarray().sum()) == 55145280
+        assert int(chunk_list[0].asarray().sum(dtype=numpy.uint64)) == 62403914
+        assert (
+            int(chunk_list[-1].asarray().sum(dtype=numpy.uint64)) == 55145280
+        )
 
         # asarray() reproduces the scene array
         all_planes = sc1.asarray()
         assert all_planes.shape == sc1.shape
-        assert int(all_planes.sum()) == 699256173
+        assert int(all_planes.sum(dtype=numpy.uint64)) == 699256173
 
         # chunk-by-chunk assembly matches asarray()
         # (equivalent but much slower than asarray())
@@ -3642,13 +3783,16 @@ def test_multiscene_mosaic():
         assert len(chunks_list) == 12  # T=2 * C=2 * Z=3
         assembled = numpy.stack([c.asarray() for c in chunks_list])
         assembled = assembled.reshape(img_sel.shape)
-        assert numpy.array_equal(assembled, full)
+        assert array_equal(assembled, full)
 
         # single-value Z selection squeezes that dimension out
         sub_z1 = sc1(Z=1)
         assert sub_z1.dims == ('T', 'C', 'Y', 'X')
         assert sub_z1.shape == (2, 2, 256, 256)
-        assert int(sub_z1.asarray(maxworkers=1).sum()) == 232559034
+        assert (
+            int(sub_z1.asarray(maxworkers=1).sum(dtype=numpy.uint64))
+            == 232559034
+        )
 
         # Z=1 squeezes Z out of coords; T and C are unchanged
         assert 'Z' not in sub_z1.coords
@@ -3661,7 +3805,10 @@ def test_multiscene_mosaic():
         sub_zsl = sc1(Z=slice(1, 3))
         assert sub_zsl.dims == ('T', 'C', 'Z', 'Y', 'X')
         assert sub_zsl.shape == (2, 2, 2, 256, 256)
-        assert int(sub_zsl.asarray(maxworkers=1).sum()) == 456326113
+        assert (
+            int(sub_zsl.asarray(maxworkers=1).sum(dtype=numpy.uint64))
+            == 456326113
+        )
 
         # Z=slice(1,3) keeps only the sliced Z values in the coord
         assert list(sub_zsl.coords['Z']) == pytest.approx([1e-6, 2e-6])
@@ -3671,7 +3818,10 @@ def test_multiscene_mosaic():
         sub_tsl = sc1(T=slice(1, 2))
         assert sub_tsl.dims == ('C', 'Z', 'Y', 'X')
         assert sub_tsl.shape == (2, 3, 256, 256)
-        assert int(sub_tsl.asarray(maxworkers=1).sum()) == 339723183
+        assert (
+            int(sub_tsl.asarray(maxworkers=1).sum(dtype=numpy.uint64))
+            == 339723183
+        )
 
         # single-element T slice squeezes T out of coords as well
         assert 'T' not in sub_tsl.coords
@@ -3681,7 +3831,10 @@ def test_multiscene_mosaic():
         sub_ct = sc1(C=None, T=None)
         assert sub_ct.dims == ('Z', 'C', 'T', 'Y', 'X')
         assert sub_ct.shape == (3, 2, 2, 256, 256)
-        assert int(sub_ct.asarray(maxworkers=1).sum()) == 699256173
+        assert (
+            int(sub_ct.asarray(maxworkers=1).sum(dtype=numpy.uint64))
+            == 699256173
+        )
 
         # coord keys follow the reordered dim order
         assert list(sub_ct.coords.keys())[:3] == ['Z', 'C', 'T']
@@ -3695,8 +3848,8 @@ def test_multiscene_mosaic():
         assert 'Z' not in sub_z0.coords
         assert 'Z' not in sub_z0sl.coords
         arr_z0 = sub_z0.asarray(maxworkers=1)
-        assert int(arr_z0.sum()) == 242930060
-        assert numpy.array_equal(arr_z0, sub_z0sl.asarray(maxworkers=1))
+        assert int(arr_z0.sum(dtype=numpy.uint64)) == 242930060
+        assert array_equal(arr_z0, sub_z0sl.asarray(maxworkers=1))
 
         # ROI in absolute file coordinates: sc1 occupies Y=853..1108, X=0..255
         roi = (20, 873, 100, 80)  # (x, y, width, height)
@@ -3704,7 +3857,7 @@ def test_multiscene_mosaic():
         assert sub_roi.dims == ('T', 'C', 'Z', 'Y', 'X')
         assert sub_roi.shape == (2, 2, 3, 80, 100)
         arr_roi = sub_roi.asarray(maxworkers=1)
-        assert int(arr_roi.sum()) == 79054867
+        assert int(arr_roi.sum(dtype=numpy.uint64)) == 79054867
 
         # ROI coords represent absolute pixel positions of the cropped region:
         # roi y=873 is 20 rows into sc1 (which starts at file Y=853), so
@@ -3718,7 +3871,7 @@ def test_multiscene_mosaic():
         # ROI result equals the matching crop of the full scene array
         arr1 = sc1.asarray(maxworkers=1)
         rx, ry, rw, rh = roi
-        assert numpy.array_equal(
+        assert array_equal(
             arr_roi, arr1[:, :, :, ry - 853 : ry - 853 + rh, rx : rx + rw]
         )
 
@@ -3726,7 +3879,10 @@ def test_multiscene_mosaic():
         sub_roi_t = sc1(T=1, roi=roi)
         assert sub_roi_t.dims == ('C', 'Z', 'Y', 'X')
         assert sub_roi_t.shape == (2, 3, 80, 100)
-        assert int(sub_roi_t.asarray(maxworkers=1).sum()) == 39114141
+        assert (
+            int(sub_roi_t.asarray(maxworkers=1).sum(dtype=numpy.uint64))
+            == 39114141
+        )
 
         # chaining: selection then ROI produces same result as combined call
         base_t1 = sc1(T=1)
@@ -3734,7 +3890,7 @@ def test_multiscene_mosaic():
         chained = base_t1(roi=roi)
         assert chained.dims == sub_roi_t.dims
         assert chained.shape == sub_roi_t.shape
-        assert numpy.array_equal(
+        assert array_equal(
             chained.asarray(maxworkers=1),
             sub_roi_t.asarray(maxworkers=1),
         )
@@ -3776,19 +3932,22 @@ def test_multiscene_mosaic():
                 reconstructed[
                     :, lo_r : lo_r + tile_size, lo_c : lo_c + tile_size
                 ] = t
-        assert numpy.array_equal(reconstructed, arr_tc)
+        assert array_equal(reconstructed, arr_tc)
 
         # scenes() with a subset of scene indices: composite of sc0 and sc2
         sc02 = czi.scenes(scene=[0, 2])
         assert sc02.dims == ('T', 'C', 'Z', 'Y', 'X')
         assert sc02.shape == (2, 2, 3, 2055, 1999)
-        assert int(sc02.asarray(maxworkers=1).sum()) == 20541343831
+        assert (
+            int(sc02.asarray(maxworkers=1).sum(dtype=numpy.uint64))
+            == 20541343831
+        )
 
         # scenes(scene=[1]) with a single-item list isolates that scene and
         # returns pixel-for-pixel identical data to scenes[1].asarray()
         sc1_iso = czi.scenes(scene=[1])
         assert sc1_iso.shape == sc1.shape
-        assert numpy.array_equal(sc1_iso.asarray(maxworkers=1), arr1)
+        assert array_equal(sc1_iso.asarray(maxworkers=1), arr1)
 
         # composite vs OME-TIFF ground truth:
         # czi.scenes() merges all scenes into one full-bounding-box array.
@@ -3801,7 +3960,7 @@ def test_multiscene_mosaic():
             ome_tczyx = numpy.transpose(ome, (1, 0, 2, 3, 4))
             composite = czi.scenes().asarray(maxworkers=1)
             assert composite.shape == ome_tczyx.shape
-            assert numpy.array_equal(composite, ome_tczyx)
+            assert array_equal(composite, ome_tczyx)
 
 
 def test_decode_cache():
@@ -3956,7 +4115,7 @@ def test_decode_cache():
         czi.maxcache = 8
         img = czi.scenes[0]
         arr_with_cache = img.asarray()
-    assert numpy.array_equal(arr_no_cache, arr_with_cache)
+    assert array_equal(arr_no_cache, arr_with_cache)
 
 
 @pytest.mark.skipif(
@@ -4196,7 +4355,7 @@ def test_glob_vs_pylibczirw(filename):
                     )
                 except RuntimeError:
                     continue  # pylibCZIrw cannot decode, missing codec, type
-                assert numpy.array_equal(czi_arr, ref_arr)
+                assert array_equal(czi_arr, ref_arr)
 
 
 def pylibczirw_read_scene(czidoc, image, scene, has_scenes):
