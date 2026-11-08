@@ -1,5 +1,19 @@
+..
+  This file is updated by setup.py. Do not edit.
+
 Revisions
 =========
+
+2026.11.8
+
+- Add CziSubBlockSegmentData.datetime property.
+- Fix overflow converting BGR48 and BGR96FLOAT to gray pixel types.
+- Fix BGR channel order of raw data stored with compression field set.
+- Return copy of cached subblock data if copy is true.
+- Read CZI header at start of open file objects.
+- Ignore invalid components in lookup tables.
+- Validate segment sizes.
+- Replace invalid UTF-8 in attachment names.
 
 2026.10.14
 
