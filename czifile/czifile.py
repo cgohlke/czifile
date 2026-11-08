@@ -47,7 +47,7 @@ and file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.10.14
+:Version: 2026.11.8
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -70,15 +70,26 @@ Requirements
 This revision was tested with the following requirements and dependencies
 (other versions may work):
 
-- `CPython <https://www.python.org>`_ 3.12.10, 3.13.16, 3.14.8, 3.15.0 64-bit
+- `CPython <https://www.python.org>`_ 3.12.10, 3.13.17, 3.14.10, 3.15.2 64-bit
 - `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.10.10
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.9.20 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.8 (optional)
 
 Revisions
 ---------
+
+2026.11.8
+
+- Add CziSubBlockSegmentData.datetime property.
+- Fix overflow converting BGR48 and BGR96FLOAT to gray pixel types.
+- Fix BGR channel order of raw data stored with compression field set.
+- Return copy of cached subblock data if copy is true.
+- Read CZI header at start of open file objects.
+- Ignore invalid components in lookup tables.
+- Validate segment sizes.
+- Replace invalid UTF-8 in attachment names.
 
 2026.10.14
 
@@ -249,76 +260,76 @@ Access scenes, shape, and metadata:
 
 >>> with CziFile('Example.czi') as czi:
 ...     assert len(czi.scenes) == 3
-...     img = czi.scenes[0]  # 0 is the absolute coordinate of the first scene
-...     assert img.shape == (2, 2, 3, 486, 1178)
-...     assert img.dims == ('T', 'C', 'Z', 'Y', 'X')
-...     assert img.dtype == 'uint16'
-...     assert img.compression.name == 'ZSTDHDR'
-...     assert list(img.channels) == ['DAPI', 'EGFP']
+...     image = czi.scenes[0]  # 0 is the absolute coordinate of first scene
+...     assert image.shape == (2, 2, 3, 486, 1178)
+...     assert image.dims == ('T', 'C', 'Z', 'Y', 'X')
+...     assert image.dtype == 'uint16'
+...     assert image.compression.name == 'ZSTDHDR'
+...     assert list(image.channels) == ['DAPI', 'EGFP']
 ...     assert czi.metadata().startswith('<ImageDocument>')
 ...
 
 Select dimensions and read as numpy array:
 
 >>> with CziFile('Example.czi') as czi:
-...     img = czi.scenes[0]
-...     assert img.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 486, 'X': 1178}
+...     image = czi.scenes[0]
+...     assert image.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 486, 'X': 1178}
 ...
 ...     # integer selection: fix T=0 and C=0; result has Z, but no T or C axis
-...     volume = img(T=0, C=0).asarray()
+...     volume = image(T=0, C=0).asarray()
 ...     assert volume.shape == (3, 486, 1178)
 ...
 ...     # None selection: keep all values but reorder dimensions
 ...     # dims order follows the kwargs order, then spatial dims
 ...     # T (unspecified) comes first, then C, Z (in kwargs order), then Y X
-...     tczyx = img(C=None, Z=None).asarray()
+...     tczyx = image(C=None, Z=None).asarray()
 ...     assert tczyx.shape == (2, 2, 3, 486, 1178)
 ...
 ...     # read in C-outer, Z-inner, T-innermost order with parallelism
-...     arr = img(C=None, Z=None, T=None).asarray(maxworkers=8)
+...     arr = image(C=None, Z=None, T=None).asarray(maxworkers=8)
 ...     assert arr.shape == (2, 3, 2, 486, 1178)  # 'C', 'Z', 'T', 'Y', 'X'
 ...
-...     # img.bbox gives (x, y, width, height) in global CZI coordinates
-...     x0, y0, *_ = img.bbox
-...     plane_roi = img(T=0, C=0, roi=(x0, y0, 128, 128)).asarray()
+...     # image.bbox gives (x, y, width, height) in global CZI coordinates
+...     x0, y0, *_ = image.bbox
+...     plane_roi = image(T=0, C=0, roi=(x0, y0, 128, 128)).asarray()
 ...     assert plane_roi.shape == (3, 128, 128)  # 'Z', 'Y', 'X'
 ...
 ...     # fill pixels outside subblock coverage with a specific value
-...     padded = img(C=0, roi=(0, 0, 2048, 2048)).asarray(fillvalue=0)
+...     padded = image(C=0, roi=(0, 0, 2048, 2048)).asarray(fillvalue=0)
 ...     assert padded.shape == (2, 3, 2048, 2048)  # 'T', 'Z', 'Y', 'X'
 ...
 
 Iterate image chunks:
 
 >>> with CziFile('Example.czi') as czi:
-...     img = czi.scenes[0]
+...     image = czi.scenes[0]
 ...
 ...     # iterate individual Y/X planes as CziImage views
 ...     # by default, all non-spatial dims are iterated one-at-a-time
-...     for chunk in img.chunks():
+...     for chunk in image.chunks():
 ...         assert isinstance(chunk, CziImage)
 ...         assert chunk.asarray().shape == (486, 1178)
 ...
 ...     # keep C in each chunk: iterate T and Z only
-...     for chunk in img.chunks(C=None):
+...     for chunk in image.chunks(C=None):
 ...         assert chunk.asarray().shape == (2, 486, 1178)
 ...
 ...     # batch Z into groups of 3; last chunk may be smaller if Z indivisible
-...     for chunk in img.chunks(Z=3):
+...     for chunk in image.chunks(Z=3):
 ...         assert chunk.sizes['Z'] <= 3
 ...
 ...     # spatial tiling: iterate T x C x Z x grid
-...     for chunk in img.chunks(Y=256, X=256):
+...     for chunk in image.chunks(Y=256, X=256):
 ...         assert chunk.shape[-2] <= 256
 ...         assert chunk.shape[-1] <= 256
 ...
 ...     # keep C, tile spatially
-...     for chunk in img.chunks(C=None, Y=256, X=256):
+...     for chunk in image.chunks(C=None, Y=256, X=256):
 ...         assert chunk.dims[0] == 'C'
 ...
 ...     # align spatial chunks with stored subblocks
-...     assert img.subblock_sizes == {'Y': 256, 'X': 256}
-...     chunks = img.chunks(**img.subblock_sizes)
+...     assert image.subblock_sizes == {'Y': 256, 'X': 256}
+...     chunks = image.chunks(**image.subblock_sizes)
 ...
 
 Read image as xarray DataArray with physical coordinates and attributes:
@@ -334,8 +345,8 @@ Access multiple scenes:
 
 >>> with CziFile('Example.czi') as czi:
 ...     # iterate scenes individually and read as arrays
-...     for img in czi.scenes.values():
-...         arr = img.asarray()
+...     for image in czi.scenes.values():
+...         arr = image.asarray()
 ...
 ...     # query which scenes (indices) are available
 ...     assert list(czi.scenes.keys()) == [0, 1, 2]
@@ -350,23 +361,26 @@ Access multiple scenes:
 ...     }
 ...
 ...     # merge selected scenes into one
-...     img = czi.scenes(scene=[0, 1])  # first 2 scenes
-...     assert img.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 1109, 'X': 1760}
+...     image = czi.scenes(scene=[0, 1])  # first 2 scenes
+...     assert image.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 1109, 'X': 1760}
 ...
 ...     # merge all scenes into one
-...     img = czi.scenes()
-...     assert img.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 2055, 'X': 2581}
+...     image = czi.scenes()
+...     assert image.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 2055, 'X': 2581}
 ...
 
-Access pyramid levels:
+Access pyramid levels (scene -> level -> plane):
 
 >>> with CziFile('Example.czi') as czi:
-...     img = czi.scenes[0]
-...     assert img.is_pyramid
-...     assert len(img.levels) == 2  # full resolution + 1 downsampled level
-...     assert img.levels[0] is img  # full resolution level is the same as img
-...     overview = img.levels[1]  # lowest-res level
-...     assert overview.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 243, 'X': 589}
+...     image = czi.scenes[0]
+...     assert image.is_pyramid
+...     assert len(image.levels) == 2  # full resolution + 1 downsampled level
+...     assert image.levels[0] is image  # full resolution level is image
+...     level = image.levels[1]  # lowest-res level
+...     assert level.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 243, 'X': 589}
+...     arr = level.asarray()  # full level image as array
+...     plane = level(T=0, C=0, Z=0).asarray()  # single plane as array
+...     assert plane.shape == (243, 589)
 ...
 
 Iterate directory entries as CziImage views:
@@ -414,11 +428,12 @@ Low-level access to CZI file segments:
 ...         assert tile.dtype == entry.pixel_type.dtype
 ...         assert isinstance(segdata.data(raw=True), bytes)  # compressed data
 ...         assert segdata.metadata().startswith('<METADATA>')
+...         mask = segdata.mask()  # optional validity mask
 ...         break  # just the first subblock segment for demonstration
 ...
 ...     # iterate only image tiles in a selected image view
-...     img = czi.scenes[0](T=0, C=0, Z=0)
-...     for entry in img.directory_entries:
+...     image = czi.scenes[0](T=0, C=0, Z=0)
+...     for entry in image.directory_entries:
 ...         segdata = entry.read_segment_data(czi)
 ...         assert isinstance(segdata, CziSubBlockSegmentData)
 ...         tile = segdata.data()
@@ -445,7 +460,7 @@ View the images and metadata in a CZI file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.10.14'
+__version__ = '2026.11.8'
 
 __all__ = [
     'CONVERT_PIXELTYPE',
@@ -671,23 +686,33 @@ def imread(
 class BinaryFile:
     """Binary file.
 
+    :Version: 2026.11.1
+
     Parameters:
         file:
-            File name or seekable binary stream.
+            File name, seekable binary stream, fsspec OpenFile, or mmap.
         mode:
             File open mode if ``file`` is a file name.
             If not specified, defaults to ``'r'``. Files are always opened
             in binary mode.
+            Ignored for streams and other file objects.
         memmap:
             Map file into memory.
             Ignored if memory mapping is not available or if the stream does
             not support it.
+            ``mmap.mmap`` objects are always accessed directly.
 
     Notes:
         Memory mapping can improve random-access read performance on large
         files or repeated reads of the same file regions by reducing syscall
         overhead and data copying.
         For sequential one-pass reads, regular buffered I/O may be faster.
+
+        File access is not thread-safe unless the file is memory-mapped
+        or ``set_lock(True)`` was called.
+
+        This class is shared (inlined) among many modules, for example,
+        czifile, liffile, sdtfile, orifile, obffile, ptufile, and fbdfile.
 
     Raises:
         TypeError:
@@ -727,7 +752,7 @@ class BinaryFile:
         self._memmap = bool(memmap)
         self._lock = contextlib.nullcontext()
 
-        if isinstance(file, (str, os.PathLike)):
+        if isinstance(file, str | os.PathLike):
             ext = os.path.splitext(file)[-1].lower()
             if self._ext and ext not in self._ext:
                 msg = f'invalid file extension: {ext!r} not in {self._ext!r}'
@@ -754,57 +779,84 @@ class BinaryFile:
                 raise TypeError(msg)
 
             self._fh = file
-            try:
-                self._fh.tell()
-            except Exception as exc:
+            if not self._is_seekable(self._fh):
                 msg = f'{file=!r} is not seekable'
-                raise ValueError(msg) from exc
-            if hasattr(file, 'path'):
-                self._path = os.path.abspath(file.path)
-            elif hasattr(file, 'name'):
-                self._path = os.path.abspath(file.name)
+                raise ValueError(msg)
+            self._path = self._file_path(file)
 
         elif hasattr(file, 'open'):
             # fsspec OpenFile
             self._fh = file.open()
             self._close = True
-            try:
-                self._fh.tell()
-            except Exception as exc:
+            fh: object = self._fh
+            if isinstance(fh, io.TextIOBase):
+                with contextlib.suppress(Exception):
+                    fh.close()
+                msg = f'{file=!r} is not open in binary mode'
+                raise TypeError(msg)
+            if not self._is_seekable(self._fh):
                 with contextlib.suppress(Exception):
                     self._fh.close()
                 msg = f'{file=!r} is not seekable'
-                raise ValueError(msg) from exc
-            if hasattr(file, 'path'):
-                self._path = os.path.abspath(file.path)
+                raise ValueError(msg)
+            self._path = self._file_path(file)
 
         else:
             msg = f'cannot handle {type(file)=}'
             raise TypeError(msg)
 
-        if hasattr(file, 'name') and file.name:
-            self._name = os.path.basename(file.name)
+        name = getattr(file, 'name', None)
+        if isinstance(name, str | os.PathLike) and os.fspath(name):
+            self._name = os.path.basename(name)
         elif self._path:
             self._name = os.path.basename(self._path)
         else:
             self._name = type(file).__name__
 
-        if memmap:
-            _fh: Any = self._fh
-            if isinstance(_fh, mmap.mmap):
-                self._mm = _fh
+        _fh: Any = self._fh
+        if isinstance(_fh, mmap.mmap):
+            # mmap objects lack readinto and writable
+            self._mm = _fh
+            self._mv = memoryview(self._mm)
+        elif memmap:
+            try:
+                access = (
+                    mmap.ACCESS_WRITE
+                    if self._fh.writable()
+                    else mmap.ACCESS_READ
+                )
+                self._mm = mmap.mmap(self._fh.fileno(), 0, access=access)
                 self._mv = memoryview(self._mm)
-            else:
-                try:
-                    access = (
-                        mmap.ACCESS_WRITE
-                        if self._fh.writable()
-                        else mmap.ACCESS_READ
-                    )
-                    self._mm = mmap.mmap(self._fh.fileno(), 0, access=access)
-                    self._mv = memoryview(self._mm)
-                except OSError:
-                    pass
+            except (OSError, ValueError, AttributeError):
+                # empty file or stream without file descriptor
+                pass
+
+    @staticmethod
+    def _is_seekable(fh: Any, /) -> bool:
+        """Return whether file handle supports random access."""
+        try:
+            fh.tell()
+            # e.g. fsspec HTTPStreamFile for servers without range requests
+            seekable = getattr(fh, 'seekable', None)
+            return seekable is None or bool(seekable())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _file_path(file: Any, /) -> str:
+        """Return path of file object, absolute if on local file system."""
+        path = getattr(file, 'path', None)
+        if isinstance(path, str) and path:
+            protocol = getattr(getattr(file, 'fs', None), 'protocol', 'file')
+            if isinstance(protocol, str):
+                protocol = (protocol,)
+            if 'file' in protocol or 'local' in protocol:
+                return os.path.abspath(path)
+            return path
+        name = getattr(file, 'name', None)
+        if isinstance(name, str | os.PathLike) and os.fspath(name):
+            return os.path.abspath(name)
+        return ''
 
     @property
     def filehandle(self) -> IO[bytes]:
@@ -852,6 +904,7 @@ class BinaryFile:
             enabled:
                 If true, use a threading.RLock, else a no-op lock.
                 Has no effect when memory-mapped I/O is active.
+                Do not call while other threads access the file.
 
         """
         if self._mm is not None:
@@ -868,13 +921,23 @@ class BinaryFile:
             data: Data to write.
 
         """
-        if self._mm is not None and self.writable:
-            # writable mmap: direct slice write, no cursor movement
-            self._mm[offset : offset + len(data)] = data
+        mv = self._mv
+        if mv is not None and not mv.readonly:
+            # slicing would silently write at negative or clipped offsets
+            end = offset + len(data)
+            if offset < 0 or end > len(mv):
+                msg = (
+                    f'cannot write {len(data)} bytes at {offset=} past end '
+                    f'of memory-mapped file of size {len(mv)}'
+                )
+                raise ValueError(msg)
+            mv[offset:end] = data
         else:
+            # regular streams reject negative offsets
             with self._lock:
                 self._fh.seek(offset)
                 self._fh.write(data)
+            self.__dict__.pop('filesize', None)
 
     def _read_at(self, offset: int, size: int, /) -> bytes | memoryview:
         """Read bytes from file at given offset.
@@ -885,12 +948,21 @@ class BinaryFile:
 
         Parameters:
             offset: Byte offset from start of file.
-            size: Number of bytes to read.
+            size: Number of bytes to read. If ``-1``, read to end of file.
 
         """
+        # hot path for small reads; regular streams reject bad arguments
         mv = self._mv
         if mv is not None:
+            if offset < 0 or size < 0:
+                # slicing would silently misread; size=-1 reads to end
+                if offset < 0 or size < -1:
+                    msg = f'{offset=} < 0 or {size=} < -1'
+                    raise ValueError(msg)
+                return mv[offset:]
             return mv[offset : offset + size]
+        # do not allocate more than available for corrupted sizes
+        # size = min(size, max(0, self.filesize - offset))
         fh = self._fh
         with self._lock:
             fh.seek(offset)
@@ -907,9 +979,16 @@ class BinaryFile:
             Number of bytes read.
 
         """
+        # hot path for bulk reads shared by many modules: keep it minimal.
+        # Buffered streams fill the buffer in one readinto call until EOF;
+        # do not add short-read loops or typed-buffer handling here.
         nbytes = len(buffer)
         mv = self._mv
         if mv is not None:
+            if offset < 0:
+                # slicing would silently index from the end of the map
+                msg = f'{offset=} < 0'
+                raise ValueError(msg)
             n = min(nbytes, max(0, len(mv) - offset))
             buffer[:n] = numpy.frombuffer(mv[offset : offset + n], numpy.uint8)
             return n
@@ -919,9 +998,10 @@ class BinaryFile:
             fh.seek(offset)
             try:
                 return fh.readinto(buffer)  # type: ignore[attr-defined, no-any-return]
-            except (AttributeError, OSError):
+            except (AttributeError, io.UnsupportedOperation):
+                # stream without readinto; do not swallow real I/O errors
                 data = fh.read(nbytes)
-                buffer[:] = numpy.frombuffer(data, numpy.uint8)
+                buffer[: len(data)] = numpy.frombuffer(data, numpy.uint8)
                 return len(data)
 
     def _read_array(
@@ -953,6 +1033,7 @@ class BinaryFile:
             writable:
                 By default, return read-only array from memory-mapped file.
                 Prevents accidental modification of underlying writable file.
+                Arrays from read-only memory maps are always read-only.
                 Has no effect for non-memory-mapped files (always writable).
             truncate:
                 Allow partial reads of array.
@@ -961,36 +1042,43 @@ class BinaryFile:
         """
         dtype = numpy.dtype(dtype)
         itemsize = dtype.itemsize
-        if offset < 0:
-            msg = f'{offset=} < 0'
-            raise ValueError(msg)
-        if count < -1:
-            msg = f'{count=} < -1'
-            raise ValueError(msg)
 
         mv = self._mv
         if mv is not None:
+            if offset < 0 or count < -1:
+                # slicing would silently misread; regular streams raise
+                msg = f'{offset=} < 0 or {count=} < -1'
+                raise ValueError(msg)
             if count == -1:
                 count = max(0, (len(mv) - offset) // itemsize)
             nbytes = count * itemsize
             size = min(nbytes, max(0, len(mv) - offset))
             n = size - size % itemsize
-            array = numpy.frombuffer(
-                mv[offset : offset + n],
-                dtype,
-            )
             if copy:
-                array = array.copy()
-            elif not writable and array.flags.writeable:
-                array.flags.writeable = False
+                # ndarray.copy is slow for structured dtypes
+                array = numpy.frombuffer(
+                    bytearray(mv[offset : offset + n]), dtype
+                )
+            else:
+                array = numpy.frombuffer(mv[offset : offset + n], dtype)
+                if not writable and array.flags.writeable:
+                    array.flags.writeable = False
         elif count > -1:
+            # read directly; routing through _read_into adds per-call overhead
             fh = self._fh
             nbytes = count * itemsize
+            # do not allocate more than available for corrupted sizes
+            # available = max(0, (self.filesize - offset) // itemsize)
+            # array = numpy.empty(min(count, available), dtype)
             array = numpy.empty(count, dtype)
             with self._lock:
                 fh.seek(offset)
-                n = fh.readinto(array.data)  # type: ignore[attr-defined]
+                # array.data builds slow PEP 3118 format for structured dtypes
+                n = fh.readinto(array)  # type: ignore[attr-defined]
         else:
+            if count < -1:
+                msg = f'{count=} < -1'
+                raise ValueError(msg)
             fh = self._fh
             with self._lock:
                 fh.seek(0, os.SEEK_END)
@@ -999,7 +1087,7 @@ class BinaryFile:
                 nbytes = count * itemsize
                 array = numpy.empty(count, dtype)
                 fh.seek(offset)
-                n = fh.readinto(array.data)  # type: ignore[attr-defined]
+                n = fh.readinto(array)  # type: ignore[attr-defined]
 
         if n != nbytes:
             array = array[: n // itemsize]
@@ -1017,10 +1105,12 @@ class BinaryFile:
         if self._mm is not None:
             return len(self._mm)
         fh = self._fh
-        try:
-            return os.fstat(fh.fileno()).st_size
-        except (AttributeError, io.UnsupportedOperation, OSError):
-            pass
+        if not fh.writable():
+            # fstat does not see unflushed writes
+            try:
+                return os.fstat(fh.fileno()).st_size
+            except (AttributeError, io.UnsupportedOperation, OSError):
+                pass
         with self._lock:
             pos = fh.tell()
             fh.seek(0, os.SEEK_END)
@@ -1031,6 +1121,8 @@ class BinaryFile:
     @property
     def writable(self) -> bool:
         """File is open for writing."""
+        if self._mv is not None:
+            return not self._mv.readonly
         return self._fh.writable()
 
     @property
@@ -1089,7 +1181,7 @@ class CziFile(BinaryFile):
     Parameters:
         file:
             CZI file to read.
-            Open file objects must be positioned at CZI header.
+            CZI header must be at start of open file objects.
         mode:
             File open mode if ``file`` is file name. Defaults to ``'r'``.
         memmap:
@@ -1138,9 +1230,7 @@ class CziFile(BinaryFile):
 
         super().__init__(file, mode=mode_, memmap=memmap)
 
-        fh = self._fh
-
-        magic = fh.read(10)
+        magic = bytes(self._read_at(0, 10))
         if magic != b'ZISRAWFILE':
             self.close()
             msg = f'not a CZI file {magic=!r}'
@@ -1502,8 +1592,8 @@ class CziFile(BinaryFile):
             image = self.scenes()
         elif scene == FIRST_SCENE:
             image = next(iter(self.scenes.values()))
-        elif isinstance(scene, int):
-            image = self.scenes[scene]
+        elif isinstance(scene, int | numpy.integer):
+            image = self.scenes[int(scene)]
         else:
             image = self.scenes(scene=scene)
         if roi is not None or selection or pixeltype is not None or storedsize:
@@ -1574,8 +1664,8 @@ class CziFile(BinaryFile):
             image = self.scenes()
         elif scene == FIRST_SCENE:
             image = next(iter(self.scenes.values()))
-        elif isinstance(scene, int):
-            image = self.scenes[scene]
+        elif isinstance(scene, int | numpy.integer):
+            image = self.scenes[int(scene)]
         else:
             image = self.scenes(scene=scene)
         if roi is not None or selection or pixeltype is not None or storedsize:
@@ -1790,7 +1880,7 @@ class CziImage:
                 has a dimension selection or ROI applied.
                 Applying a ROI to an image that already has a dimension
                 selection is permitted (one level of chaining only):
-                ``img(C=0)(roi=...)`` works, but further calls on the
+                ``image(C=0)(roi=...)`` works, but further calls on the
                 result always raise ``TypeError``.
             ValueError:
                 If roi width or height is not positive, or if a
@@ -1798,21 +1888,21 @@ class CziImage:
 
         Example::
 
-            # img.dims = ('T', 'C', 'Z', 'Y', 'X')
+            # image.dims == ('T', 'C', 'Z', 'Y', 'X')
 
             # fix C=1: result has dims ('T', 'Z', 'Y', 'X')
-            sub = img(C=1)
+            sub = image(C=1)
 
             # reorder to Z-outer, T-inner; result has dims ('Z', 'T', 'Y', 'X')
-            sub = img(Z=None, T=None)
+            sub = image(Z=None, T=None)
 
             # combine: fix T to first time-point, then reorder C outer Z inner
             # all coordinate values are absolute CZI file-level indices
-            sub = img(T=0, C=None, Z=None)  # dims: ('C', 'Z', 'Y', 'X')
+            sub = image(T=0, C=None, Z=None)  # dims: ('C', 'Z', 'Y', 'X')
 
             # crop to a 256x256 ROI (absolute pixel coordinates)
-            x0, y0, *_ = img.bbox
-            sub = img(C=0, roi=(x0, y0, 256, 256))
+            x0, y0, *_ = image.bbox
+            sub = image(C=0, roi=(x0, y0, 256, 256))
 
         """
         inherited_pixeltype = (
@@ -1872,7 +1962,8 @@ class CziImage:
             if val is None:
                 continue
             dim_idx = dims_list.index(dim)
-            if isinstance(val, int):
+            if isinstance(val, int | numpy.integer):
+                val = int(val)  # noqa: PLW2901
                 entries = tuple(e for e in entries if e.start[dim_idx] == val)
             elif isinstance(val, slice):
                 # Absolute coordinate range, consistent with int selection:
@@ -2230,7 +2321,7 @@ class CziImage:
             dw = ch_data.get('DetectionWavelength')
             if isinstance(dw, tuple):
                 dw_ranges.append(dw)
-            elif isinstance(dw, (int, float)):
+            elif isinstance(dw, int | float):
                 dw_ranges.append((float(dw), float(dw)))
             else:
                 break
@@ -2377,15 +2468,7 @@ class CziImage:
         root = self._parent.xml_element
         if root is None:
             return None
-        s = root.findtext('.//AcquisitionDateAndTime')
-        sentinel = '0001-01-01T00:00:00'
-        if not s or s.startswith(sentinel):
-            return None
-        try:
-            clean = re.sub(r'Z$|[+-]\d{2}:\d{2}$', '', s).replace(' ', 'T')
-            return numpy.datetime64(clean, 'ns')
-        except (ValueError, OverflowError):
-            return None
+        return parse_datetime(root.findtext('.//AcquisitionDateAndTime'))
 
     @cached_property
     def channels(self) -> dict[str, dict[str, Any]]:
@@ -2989,19 +3072,19 @@ class CziImage:
         Example::
 
             # iterate individual Y/X planes
-            for chunk in img.chunks():
+            for chunk in image.chunks():
                 process(chunk.asarray())
 
             # keep C in each chunk, iterate T and Z
-            for chunk in img.chunks(C=None):
+            for chunk in image.chunks(C=None):
                 assert 'C' in chunk.dims
 
             # batch Z into groups of 10
-            for chunk in img.chunks(Z=10):
+            for chunk in image.chunks(Z=10):
                 arr = chunk.asarray()
 
             # spatial tiling: 512x512 tiles
-            for chunk in img.chunks(Y=512, X=512):
+            for chunk in image.chunks(Y=512, X=512):
                 tile = chunk.asarray()
 
         For bulk reads, use :py:meth:`CziImage.asarray` directly, which is
@@ -3419,13 +3502,13 @@ class CziImageChunks:
             if dim not in raw:
                 msg = f'unknown dimension {dim!r}'
                 raise ValueError(msg)
-            if val is not None and not isinstance(val, int):
+            if val is not None and not isinstance(val, int | numpy.integer):
                 msg = (  # type: ignore[unreachable]
                     f'chunk size for {dim!r} must be int or None,'
                     f' got {type(val).__name__}'
                 )
                 raise TypeError(msg)
-            if isinstance(val, int) and val < 1:
+            if isinstance(val, int | numpy.integer) and val < 1:
                 msg = f'chunk size for {dim!r} must be positive, got {val}'
                 raise ValueError(msg)
         self._sizes = dict(sizes)
@@ -3530,7 +3613,8 @@ class CziImageChunks:
                     selection.update(zip(iter_dims, combo, strict=True))
                 else:
                     for dim, val in zip(iter_dims, combo, strict=True):
-                        if isinstance(val, int):
+                        if isinstance(val, int | numpy.integer):
+                            val = int(val)  # noqa: PLW2901
                             entries = tuple(
                                 e
                                 for e in entries
@@ -3876,8 +3960,8 @@ class CziScenes(collections.abc.Mapping[int, CziImage]):
         # build name
         if scene is None:
             name = 'All scenes'
-        elif isinstance(scene, int):
-            name = f'Scene {scene}'
+        elif isinstance(scene, int | numpy.integer):
+            name = f'Scene {int(scene)}'
         else:
             name = f'Scenes {scene!r}'
         image = CziImage(
@@ -3972,7 +4056,8 @@ class CziScenes(collections.abc.Mapping[int, CziImage]):
         """Resolve scene argument to a tuple of valid scene keys."""
         if scene is None:
             return self._scene_indices
-        if isinstance(scene, int):
+        if isinstance(scene, int | numpy.integer):
+            scene = int(scene)
             if scene not in self._scene_indices:
                 msg = (
                     f'scene key {scene!r} not found: '
@@ -4233,6 +4318,11 @@ class CziMetadataSegmentData(CziSegmentData):
         # header (8) + spare (248); xml_offset is at +256 per spec
         data = segment.czifile._read_at(segment.data_offset, 8)
         self.xml_size, self.attachment_size = struct.unpack('<ii', data)
+        if self.xml_size < 0 or self.xml_size + 256 > max(
+            segment.allocated_size, segment.used_size
+        ):
+            msg = f'invalid metadata segment {self.xml_size=}'
+            raise CziFileError(msg)
         self.xml_offset = segment.data_offset + 256
 
     @property
@@ -4305,6 +4395,12 @@ class CziSubBlockSegmentData(CziSegmentData):
             self.attachment_size,
             self.data_size,
         ) = struct.unpack_from('<iiq', header)
+        if min(self.metadata_size, self.attachment_size, self.data_size) < 0:
+            msg = (
+                f'invalid subblock segment {self.metadata_size=}, '
+                f'{self.attachment_size=}, {self.data_size=}'
+            )
+            raise CziFileError(msg)
         dimensions_count = struct.unpack_from('<i', header, 44)[0]
 
         # second read starts 16 bytes in and covers variable-length DE
@@ -4318,6 +4414,18 @@ class CziSubBlockSegmentData(CziSegmentData):
             + max(240, self.directory_entry.storage_size)
             + self.metadata_size
         )
+        if (
+            self.data_offset
+            + self.data_size
+            + self.attachment_size
+            - segment.data_offset
+            > max(segment.allocated_size, segment.used_size)
+        ):
+            msg = (
+                f'invalid subblock segment {self.metadata_size=}, '
+                f'{self.attachment_size=}, {self.data_size=}'
+            )
+            raise CziFileError(msg)
 
     @property
     def segment(self) -> CziSegment:
@@ -4376,6 +4484,22 @@ class CziSubBlockSegmentData(CziSegmentData):
             return xml2dict(metadata.decode())['METADATA']  # type: ignore[no-any-return]
         return metadata.decode()
 
+    @property
+    def datetime(self) -> numpy.datetime64 | None:
+        """Acquisition datetime from subblock metadata, or None.
+
+        Parsed from the ``Tags/AcquisitionTime`` XML field.
+        Timezone information is stripped before parsing.
+        Return None when the field is absent, contains the zero sentinel
+        (``0001-01-01T00:00:00``), or cannot be parsed.
+
+        """
+        try:
+            root = ElementTree.fromstring(self.metadata())
+        except (ElementTree.ParseError, UnicodeDecodeError):
+            return None
+        return parse_datetime(root.findtext('.//Tags/AcquisitionTime'))
+
     @overload
     def data(
         self, *, raw: Literal[False] = ..., copy: bool = ...
@@ -4429,10 +4553,11 @@ class CziSubBlockSegmentData(CziSegmentData):
         pixeltype = de.pixel_type
         decode = de.decode
         decode_cache = czifile._cache
+        raw_fallback = False
         if decode is not None:
             cached = decode_cache.get(self.data_offset)
             if cached is not None:
-                return cached
+                return cached.copy() if copy else cached
         if decode is not None:
             data = czifile._read_at(self.data_offset, self.data_size)
             if len(data) != self.data_size:
@@ -4441,6 +4566,7 @@ class CziSubBlockSegmentData(CziSegmentData):
             if self.data_size == size:
                 # TODO: report bug in CZI writer
                 image = numpy.frombuffer(data, dtype)
+                raw_fallback = True
             elif compression in {5, 6, 7}:
                 # ZSTD and CHUNKED: pass itemsize for hilo byte-shuffle
                 # unshuffle and samples for BGR->RGB conversion
@@ -4459,9 +4585,10 @@ class CziSubBlockSegmentData(CziSegmentData):
             else:
                 image = decode(data, out=size)
         elif compression == 0 or compression > 999:
-            # SYSTEMRAW (>999) and CAMERARAW (100-999) are read as raw,
-            # uncompressed pixels. Callers compositing via CziImage.asarray
-            # see a warning there. Direct callers of data() do not.
+            # SYSTEMRAW (>999) is read as raw, uncompressed pixels.
+            # CAMERARAW (100-999) is not supported and raises below.
+            # Callers compositing via CziImage.asarray see a warning there.
+            # Direct callers of data() do not.
             image = czifile._read_array(
                 self.data_offset,
                 self.data_size // dtype.itemsize,
@@ -4497,7 +4624,9 @@ class CziSubBlockSegmentData(CziSegmentData):
         # detach from file mmap before any in-place modifications
         if decode is None and copy and czifile._mm is not None:
             image = image.copy()
-        if compression not in {1, 4, 5, 6, 7} and pixeltype.samples in {3, 4}:
+        if pixeltype.samples in {3, 4} and (
+            raw_fallback or compression not in {1, 4, 5, 6, 7}
+        ):
             if not image.flags.writeable:
                 image = image.copy()
             # BGR -> RGB or BGRA -> RGBA: swap channels 0 and 2 in-place
@@ -4509,6 +4638,11 @@ class CziSubBlockSegmentData(CziSegmentData):
                 image[..., 3] = 255
         if decode is not None:
             decode_cache.put(self.data_offset, image)
+            if copy and (
+                decode_cache.maxsize > 0
+                or (raw_fallback and not image.flags.writeable)
+            ):
+                image = image.copy()
         return image
 
     def attachments(self) -> tuple[tuple[bytes, bytes], ...]:
@@ -4565,7 +4699,7 @@ class CziSubBlockSegmentData(CziSegmentData):
                 return None
             data = self._segment._czifile._read_at(offset + 20, chunk_size)
         else:
-            # raw layout: whole attachment is [guid:16][mask_header:16][bits]
+            # layout: [prefix:16][guid:16][mask_header:16][bits]
             tail = self.attachment_size - 16
             if tail < 16:
                 return None
@@ -4873,6 +5007,19 @@ class CziDirectoryEntryDV:
             metadata_size, attachment_size, data_size = struct.unpack_from(
                 '<iiq', header, 32
             )
+            if min(metadata_size, attachment_size, data_size) < 0 or (
+                16
+                + max(240, self.storage_size)
+                + metadata_size
+                + data_size
+                + attachment_size
+                > max(allocated_size, used_size)
+            ):
+                msg = (
+                    f'invalid subblock segment {metadata_size=}, '
+                    f'{attachment_size=}, {data_size=}'
+                )
+                raise CziFileError(msg)
             segmentdata = CziSubBlockSegmentData.__new__(
                 CziSubBlockSegmentData
             )
@@ -5118,6 +5265,11 @@ class CziAttachmentSegmentData(CziSegmentData):
         # read 144: 16-byte header (data_size + reserved) + 128-byte entry
         header = segment.czifile._read_at(offset, 144)
         self.data_size = struct.unpack_from('<i', header)[0]
+        if self.data_size < 0 or self.data_size + 256 > max(
+            segment.allocated_size, segment.used_size
+        ):
+            msg = f'invalid attachment segment {self.data_size=}'
+            raise CziFileError(msg)
         self.attachment_entry = CziAttachmentEntryA1(header[16:], offset + 16)
         self.data_offset = offset + 256  # 16 + 128 + 112 reserved
 
@@ -5249,7 +5401,7 @@ class CziAttachmentEntryA1:
         self.content_file_type = CziContentFileType(
             content_file_type.rstrip(b'\x00').decode('cp1252')
         )
-        self.name = name.rstrip(b'\x00').decode()
+        self.name = name.rstrip(b'\x00').decode(errors='replace')
 
     @staticmethod
     def read_file_position(fh: IO[bytes], /) -> int:
@@ -5616,6 +5768,7 @@ def read_lookup_table(
             '<i80si', data, pos
         )
         pos += 88
+        components: list[NDArray[Any] | None] | NDArray[Any]
         components = [None] * number_components
         for _ in range(number_components):
             if pos + 12 > size:
@@ -5633,10 +5786,15 @@ def read_lookup_table(
             pos += number_ints * 2
             if component_type == -1:  # RGB
                 # TODO: no test file available
-                components = intensity.reshape((-1, 3)).T  # type: ignore[assignment]
+                components = intensity.reshape((-1, 3)).T
+                break
+            if not 0 <= component_type < number_components:
                 break
             # else:  # R, G, B
             components[component_type] = intensity
+        if isinstance(components, list) and any(c is None for c in components):
+            # truncated or invalid lookup table
+            break
         luts.append(
             (
                 identifier.rstrip(b'\x00').decode(),
@@ -6017,9 +6175,10 @@ class CziCompressionType(enum.IntEnum):
 
     @classmethod
     def _missing_(cls, value: object, /) -> CziCompressionType:
-        if not isinstance(value, int):
+        if not isinstance(value, int | numpy.integer):
             msg = f'invalid compression type {value!r}'
             raise TypeError(msg)
+        value = int(value)
         if value < 100:
             logger().warning(f'unknown compression type {value!r}')
             base = cls.UNKNOWN
@@ -6027,7 +6186,7 @@ class CziCompressionType(enum.IntEnum):
             base = cls.CAMERARAW
         else:
             base = cls.SYSTEMRAW
-        obj = int.__new__(cls, int(base))
+        obj = int.__new__(cls, value)
         obj._value_ = value
         obj._name_ = base._name_
         return obj
@@ -6206,6 +6365,22 @@ def convert_bgr_gray32float(data: NDArray[Any], /) -> NDArray[Any]:
     return data
 
 
+def convert_bgr48_gray8(data: NDArray[Any], /) -> NDArray[Any]:
+    """Return GRAY8 from BGR48."""
+    data = data[..., :3].sum(axis=-1, dtype=numpy.uint32, keepdims=True)
+    return (((data + 1) // 3) >> 8).astype(numpy.uint8)
+
+
+def convert_bgr96float_gray8(data: NDArray[Any], /) -> NDArray[Any]:
+    """Return GRAY8 from BGR96FLOAT."""
+    return convert_float_byte(convert_bgr_gray32float(data))
+
+
+def convert_bgr96float_gray16(data: NDArray[Any], /) -> NDArray[Any]:
+    """Return GRAY16 from BGR96FLOAT."""
+    return convert_float_word(convert_bgr_gray32float(data))
+
+
 def convert_gray_bgr(data: NDArray[Any], /) -> NDArray[Any]:
     """Return BGR from GRAY keeping dtype."""
     return numpy.tile(data, (1, 1, 3))
@@ -6329,7 +6504,7 @@ CONVERT_PIXELTYPE: dict[
     (CziPixelType.BGR24, CziPixelType.BGR48): convert_byte_word,
     (CziPixelType.BGR24, CziPixelType.BGR96FLOAT): convert_int_float,
     (CziPixelType.BGR24, CziPixelType.BGRA32): convert_bgr_bgra,
-    (CziPixelType.BGR48, CziPixelType.GRAY8): convert_bgr_gray8,
+    (CziPixelType.BGR48, CziPixelType.GRAY8): convert_bgr48_gray8,
     (CziPixelType.BGR48, CziPixelType.GRAY16): convert_bgr_gray16,
     (
         CziPixelType.BGR48,
@@ -6339,8 +6514,8 @@ CONVERT_PIXELTYPE: dict[
     # (CziPixelType.BGR48, CziPixelType.BGR48)
     (CziPixelType.BGR48, CziPixelType.BGR96FLOAT): convert_int_float,
     (CziPixelType.BGR48, CziPixelType.BGRA32): convert_bgr48_bgra32,
-    (CziPixelType.BGR96FLOAT, CziPixelType.GRAY8): convert_bgr_gray8,
-    (CziPixelType.BGR96FLOAT, CziPixelType.GRAY16): convert_bgr_gray16,
+    (CziPixelType.BGR96FLOAT, CziPixelType.GRAY8): convert_bgr96float_gray8,
+    (CziPixelType.BGR96FLOAT, CziPixelType.GRAY16): convert_bgr96float_gray16,
     (
         CziPixelType.BGR96FLOAT,
         CziPixelType.GRAY32FLOAT,
@@ -6450,6 +6625,17 @@ def match_filename(filename: str, /) -> tuple[str, int]:
     return name, part
 
 
+def parse_datetime(value: str | None, /) -> numpy.datetime64 | None:
+    """Parse CZI datetime metadata, or return None if unavailable."""
+    if not value or value.startswith('0001-01-01T00:00:00'):
+        return None
+    try:
+        clean = re.sub(r'Z$|[+-]\d{2}:\d{2}$', '', value).replace(' ', 'T')
+        return numpy.datetime64(clean, 'ns')
+    except (ValueError, OverflowError):
+        return None
+
+
 class DecodeCache:
     """FIFO subblock decode cache keyed by file offset.
 
@@ -6529,7 +6715,7 @@ class DecodeCache:
             self._maxsize = maxsize
 
     @contextlib.contextmanager
-    def scoped_resize(self, maxsize: int, /) -> Iterator[None]:
+    def scoped_resize(self, maxsize: int, /) -> Generator[None]:
         """Context manager that temporarily changes the cache size.
 
         Restores previous size and cached entries on exit, including
@@ -6598,6 +6784,7 @@ def create_output(
             Default: ``'.memmap'``.
         fillvalue:
             Value to initialize output array.
+            Must be broadcastable to ``shape``.
             By default, return uninitialized array.
 
     Returns:
@@ -6614,7 +6801,8 @@ def create_output(
     if out is None:
         if fillvalue is None:
             return numpy.empty(shape, dtype)
-        if isinstance(fillvalue, (int, float)) and fillvalue == 0:
+        if numpy.ndim(fillvalue) == 0 and not fillvalue:
+            # zeros is faster than full: pages are zeroed lazily by the OS
             return numpy.zeros(shape, dtype)
         return numpy.full(shape, fillvalue, dtype)
     if isinstance(out, numpy.ndarray):
@@ -6803,19 +6991,17 @@ def default_maxworkers() -> int:
     """Return default maximum number of worker threads.
 
     Uses the ``CZIFILE_NUM_THREADS`` environment variable if set,
-    else half the CPU cores (up to 32), with a minimum of 1.
+    else half the available CPU cores (up to 32), with a minimum of 1.
+    The value is determined once per process.
 
     """
-    if 'CZIFILE_NUM_THREADS' in os.environ:
+    value = os.environ.get('CZIFILE_NUM_THREADS')
+    if value is not None:
         try:
-            return max(1, int(os.environ['CZIFILE_NUM_THREADS']))
+            return max(1, int(value))
         except ValueError:
-            pass
-    cpu_count: int | None = None
-    try:
-        cpu_count = len(os.sched_getaffinity(0))  # type: ignore[attr-defined]
-    except (AttributeError, OSError):
-        cpu_count = os.cpu_count()
+            logger().warning(f'invalid CZIFILE_NUM_THREADS={value!r}')
+    cpu_count = getattr(os, 'process_cpu_count', os.cpu_count)()
     if cpu_count is None:
         return 1
     return min(32, max(1, cpu_count // 2))
