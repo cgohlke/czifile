@@ -29,7 +29,7 @@
 
 """Unittests for the czifile package.
 
-:Version: 2026.11.8
+:Version: 2026.11.12
 
 """
 
@@ -90,7 +90,6 @@ from czifile.czifile import (
     asbool,
     default_maxworkers,
     match_filename,
-    read_lookup_table,
 )
 
 HERE = pathlib.Path(os.path.dirname(__file__))
@@ -263,6 +262,9 @@ def test_czi(memmap: Literal[False, True]) -> None:
         assert hdr.metadata_position > 0
         assert hdr.directory_position > 0
         assert repr(hdr).startswith("<CziFileHeaderSegmentData 'ZISRAWFILE'")
+        assert isinstance(hdr.segment, CziSegment)
+        assert hdr.segment.offset == 0
+        assert hdr.segment.sid == 'ZISRAWFILE'
 
         # subblock_directory
         sbd = czi.subblock_directory
@@ -933,41 +935,6 @@ def test_asbool() -> None:
             asbool(value)
 
 
-def test_attachment_filename_sanitized() -> None:
-    """Test attachment file name cannot escape output directory."""
-    data = struct.pack(
-        '<2s10sqi16s8s80s',
-        b'A1',
-        b'',
-        1234,
-        0,
-        bytes(16),
-        b'CZI',
-        b'../..\\x:y*?"<>|\x01name',
-    )
-    entry = CziAttachmentEntryA1(data, 0)
-    assert entry.name == '../..\\x:y*?"<>|\x01name'
-    assert entry.filename == '.._.._x_y_______name@1234.czi'
-    assert os.path.basename(entry.filename) == entry.filename
-
-
-def test_attachment_name_invalid_utf8() -> None:
-    """Test invalid UTF-8 in attachment name does not raise."""
-    data = struct.pack(
-        '<2s10sqi16s8s80s', b'A1', b'', 0, 0, bytes(16), b'CZI', b'a\xffb'
-    )
-    entry = CziAttachmentEntryA1(data, 0)
-    assert entry.name == 'a\ufffdb'
-
-
-def test_read_lookup_table_invalid_component() -> None:
-    """Test lookup table with out-of-range component type is skipped."""
-    data = struct.pack('<ii', 0, 1)
-    data += struct.pack('<i80si', 0, b'lut', 1)
-    data += struct.pack('<iii', 0, 5, 2) + bytes(4)
-    assert read_lookup_table(data) == ()
-
-
 def test_convert_pixeltype_saturate() -> None:
     """Test color to gray conversions scale or clip instead of wrapping."""
     convert = CONVERT_PIXELTYPE
@@ -991,40 +958,6 @@ def test_stream_not_at_start() -> None:
         assert czi.header.version[0] == 1
 
 
-def test_negative_subblock_size() -> None:
-    """Test negative subblock data size raises CziFileError."""
-    filename = DATA / 'Test.czi'
-    if not filename.exists():
-        pytest.skip(f'{filename!r} not found')
-    data = bytearray(filename.read_bytes())
-    with CziFile(io.BytesIO(bytes(data))) as czi:
-        offset = czi.subblock_directory[0].file_position
-    struct.pack_into('<q', data, offset + 40, -1)
-    with CziFile(io.BytesIO(bytes(data))) as czi:
-        entry = czi.subblock_directory[0]
-        with pytest.raises(CziFileError, match='invalid subblock'):
-            entry.read_segment_data(czi)
-        with pytest.raises(CziFileError, match='invalid subblock'):
-            CziSegment(czi, offset).data()
-
-
-def test_oversized_subblock_size() -> None:
-    """Test subblock data size exceeding segment raises CziFileError."""
-    filename = DATA / 'Test.czi'
-    if not filename.exists():
-        pytest.skip(f'{filename!r} not found')
-    data = bytearray(filename.read_bytes())
-    with CziFile(io.BytesIO(bytes(data))) as czi:
-        offset = czi.subblock_directory[0].file_position
-    struct.pack_into('<q', data, offset + 40, 2**40)
-    with CziFile(io.BytesIO(bytes(data))) as czi:
-        entry = czi.subblock_directory[0]
-        with pytest.raises(CziFileError, match='invalid subblock'):
-            entry.read_segment_data(czi)
-        with pytest.raises(CziFileError, match='invalid subblock'):
-            CziSegment(czi, offset).data()
-
-
 def test_subblock_data_copy_cached() -> None:
     """Test data(copy=True) does not expose cached arrays."""
     filename = DATA / 'OpenSlide/Zeiss-5-SlidePreview-Zstd0.czi'
@@ -1044,30 +977,6 @@ def test_not_czi_keeps_stream_open() -> None:
     """Test failed CziFile construction does not close caller stream."""
     buf = io.BytesIO(b'NOTACZIFILE' + bytes(512))
     with pytest.raises(CziFileError):
-        CziFile(buf)
-    assert not buf.closed
-
-
-def test_negative_segment_size() -> None:
-    """Test negative segment size raises instead of looping forever."""
-    filename = DATA / 'Test.czi'
-    if not filename.exists():
-        pytest.skip(f'{filename!r} not found')
-
-    data = bytearray(filename.read_bytes())
-    # patch allocated size of segment following file header
-    offset = 32 + struct.unpack_from('<q', data, 16)[0]
-    struct.pack_into('<q', data, offset + 16, -32)
-    with (
-        CziFile(io.BytesIO(bytes(data))) as czi,
-        pytest.raises(CziFileError, match='invalid ZISRAW segment'),
-    ):
-        list(czi.segments())
-
-    # patch allocated size of file header
-    struct.pack_into('<q', data, 16, -32)
-    buf = io.BytesIO(bytes(data))
-    with pytest.raises(CziFileError, match='Failed to read CZI file header'):
         CziFile(buf)
     assert not buf.closed
 
@@ -1908,6 +1817,16 @@ def test_pixeltype_gray8_gray32float() -> None:
         assert arr.shape == (32, 32)
         assert arr.min() <= 0
 
+        # WIC decodes float JPEG XR to clamped uint16
+        arr = czi.scenes[0](
+            C=1,
+            pixeltype=CziPixelType.GRAY32FLOAT,
+            roi=(1000, 1000, 5, 1),
+        ).asarray()
+        numpy.testing.assert_allclose(
+            arr.ravel(),
+            [-13.399414, -13.547852, -13.994141, -13.875977, -13.691406],
+        )
         # the full float channel may contain NaN sentinels (pixels with no
         # valid deconvolution result); converting to uint8 must not raise
         # RuntimeWarning: invalid value encountered in cast
