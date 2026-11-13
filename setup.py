@@ -107,7 +107,7 @@ setup(
     python_requires='>=3.12',
     install_requires=[
         'numpy>=2.1',
-        'imagecodecs>=2026.8.16',
+        'imagecodecs>=2026.11.11',
     ],
     extras_require={'all': ['xarray', 'tifffile', 'matplotlib']},
     entry_points={
