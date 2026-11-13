@@ -20,7 +20,7 @@ and file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.11.8
+:Version: 2026.11.12
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -45,13 +45,22 @@ This revision was tested with the following requirements and dependencies
 
 - `CPython <https://www.python.org>`_ 3.12.10, 3.13.17, 3.14.10, 3.15.2 64-bit
 - `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.10.10
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.11.11
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.8 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.12 (optional)
 
 Revisions
 ---------
+
+2026.11.12
+
+- Fix reading uncompressed subblocks with bytes after pixels.
+- Fix decoding float JPEG XR with WIC (use JPEG XR codec).
+- Make WIC decoder opt-in via CZIFILE_JPEGXR_DECODER environment variable.
+- Ignore subblocks in other files of multi-file CZI.
+- Fix attachment names and types with bytes after NUL terminator.
+- Raise CziFileError if decoded subblock exceeds stored size or dtype.
 
 2026.11.8
 
