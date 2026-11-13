@@ -47,7 +47,7 @@ and file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.11.8
+:Version: 2026.11.12
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -72,13 +72,22 @@ This revision was tested with the following requirements and dependencies
 
 - `CPython <https://www.python.org>`_ 3.12.10, 3.13.17, 3.14.10, 3.15.2 64-bit
 - `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
-- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.10.10
+- `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.11.11
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.8 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.12 (optional)
 
 Revisions
 ---------
+
+2026.11.12
+
+- Fix reading uncompressed subblocks with bytes after pixels.
+- Fix decoding float JPEG XR with WIC (use JPEG XR codec).
+- Make WIC decoder opt-in via CZIFILE_JPEGXR_DECODER environment variable.
+- Ignore subblocks in other files of multi-file CZI.
+- Fix attachment names and types with bytes after NUL terminator.
+- Raise CziFileError if decoded subblock exceeds stored size or dtype.
 
 2026.11.8
 
@@ -460,7 +469,7 @@ View the images and metadata in a CZI file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.11.8'
+__version__ = '2026.11.12'
 
 __all__ = [
     'CONVERT_PIXELTYPE',
@@ -1394,14 +1403,28 @@ class CziFile(BinaryFile):
 
         Uses subblock directory segment if available, else searches for
         subblock segments in file.
+        Entries of subblocks in other files of a multi-file set are
+        excluded.
 
         """
         if self.header.directory_position:
             segment = CziSegment(self, self.header.directory_position)
             if segment.sid == CziSubBlockDirectorySegmentData.SID:
-                return cast(
+                entries = cast(
                     CziSubBlockDirectorySegmentData, segment.data()
                 ).entries
+                file_part = self.header.file_part
+                own = tuple(
+                    entry
+                    for entry in entries
+                    if entry.file_part in {0, file_part}
+                )
+                if len(own) != len(entries):
+                    logger().warning(
+                        f'ignoring {len(entries) - len(own)} subblocks in '
+                        'other files of multi-file CZI (not supported)'
+                    )
+                return own
         logger().warning('SubBlockDirectory segment not found')
         return tuple(
             cast(CziSubBlockSegmentData, segment).directory_entry
@@ -4589,9 +4612,10 @@ class CziSubBlockSegmentData(CziSegmentData):
             # CAMERARAW (100-999) is not supported and raises below.
             # Callers compositing via CziImage.asarray see a warning there.
             # Direct callers of data() do not.
+            # Ignore bytes after pixels
             image = czifile._read_array(
                 self.data_offset,
-                self.data_size // dtype.itemsize,
+                min(self.data_size // dtype.itemsize, total),
                 dtype,
                 truncate=False,
             )
@@ -4599,7 +4623,20 @@ class CziSubBlockSegmentData(CziSegmentData):
             msg = f'{compression!r} invalid or not supported'
             raise ValueError(msg)
 
-        if image.size != total:
+        if image.dtype != dtype:
+            msg = (
+                f'decoded {image.dtype} does not match '
+                f'{pixeltype.name} of {compression} subblock'
+            )
+            raise CziFileError(msg)
+        if image.size > total:
+            msg = (
+                f'decoded size {image.size} exceeds stored size {total} '
+                f'of {compression} subblock'
+            )
+            raise CziFileError(msg)
+
+        if image.size < total:
             # CZI writer bug: stored_shape in the directory entry does not
             # match the number of pixels the decoder actually returned.
             # This is seen on pyramid edge-tiles where the writer stores
@@ -4843,6 +4880,9 @@ class CziDirectoryEntryDV:
         self.compression = CziCompressionType(compression)
         self.pyramid_type = CziPyramidType(pyramid_type)
         self.decode = CziCompressionType.decoder(compression)
+        if compression == 4 and self.pixel_type.dtype.kind == 'f':
+            # WIC decodes float JPEG XR to clamped uint16
+            self.decode = imagecodecs.jpegxr_decode
         self.scene_index = -1
         self.mosaic_index = -1
 
@@ -5398,10 +5438,11 @@ class CziAttachmentEntryA1:
             msg = 'not a CziAttachmentEntryA1'
             raise CziFileError(msg)
         self.content_guid = uuid.UUID(bytes=content_guid)
+        # NUL-terminated strings, possibly followed by garbage
         self.content_file_type = CziContentFileType(
-            content_file_type.rstrip(b'\x00').decode('cp1252')
+            content_file_type.split(b'\x00', 1)[0].decode('cp1252')
         )
-        self.name = name.rstrip(b'\x00').decode(errors='replace')
+        self.name = name.split(b'\x00', 1)[0].decode(errors='replace')
 
     @staticmethod
     def read_file_position(fh: IO[bytes], /) -> int:
@@ -6200,8 +6241,10 @@ class CziCompressionType(enum.IntEnum):
         """Return decoder function for compression type value.
 
         Resolved lazily on first call per value and cached.
-        For JPEG XR (value 4), prefers WIC on Windows when available and
-        falls back to :py:func:`imagecodecs.jpegxr_decode` otherwise.
+        For JPEG XR (value 4), use :py:func:`imagecodecs.jpegxr_decode`.
+        Set the ``CZIFILE_JPEGXR_DECODER`` environment variable to
+        ``'wic'`` to prefer :py:func:`imagecodecs.wic_decode` on Windows
+        when available.
 
         Parameters:
             value:
@@ -6218,7 +6261,14 @@ class CziCompressionType(enum.IntEnum):
             case 2:
                 result = imagecodecs.lzw_decode
             case 4:
-                if imagecodecs.WIC.available:
+                name = os.environ.get(
+                    'CZIFILE_JPEGXR_DECODER', 'jpegxr'
+                ).lower()
+                if name not in {'wic', 'jpegxr'}:
+                    logger().warning(
+                        f'invalid CZIFILE_JPEGXR_DECODER={name!r}'
+                    )
+                if name == 'wic' and imagecodecs.WIC.available:
                     result = imagecodecs.wic_decode
                 else:
                     result = imagecodecs.jpegxr_decode
