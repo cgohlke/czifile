@@ -4,6 +4,15 @@
 Revisions
 =========
 
+2026.11.12
+
+- Fix reading uncompressed subblocks with bytes after pixels.
+- Fix decoding float JPEG XR with WIC (use JPEG XR codec).
+- Make WIC decoder opt-in via CZIFILE_JPEGXR_DECODER environment variable.
+- Ignore subblocks in other files of multi-file CZI.
+- Fix attachment names and types with bytes after NUL terminator.
+- Raise CziFileError if decoded subblock exceeds stored size or dtype.
+
 2026.11.8
 
 - Add CziSubBlockSegmentData.datetime property.
