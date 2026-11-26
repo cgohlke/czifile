@@ -29,7 +29,7 @@
 
 """Unittests for the czifile package.
 
-:Version: 2026.11.12
+:Version: 2026.11.26
 
 """
 
@@ -947,6 +947,28 @@ def test_convert_pixeltype_saturate() -> None:
     assert func(-bgr96)[0, 0, 0] == 0
 
 
+def test_subblock_data_systemraw() -> None:
+    """Test SYSTEMRAW subblock is read only if data size matches."""
+    filename = DATA / 'Test.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+    with CziFile(filename) as czi:
+        sb = next(czi.subblocks())
+        de = sb.directory_entry
+        assert de.compression == CziCompressionType.UNCOMPRESSED
+        size = de.stored_size * de.dtype.itemsize
+        assert sb.data_size >= size
+        expected = sb.data()
+        de.compression = CziCompressionType(1000)  # patch to SYSTEMRAW
+        assert de.compression.name == 'SYSTEMRAW'
+        sb.data_size = size
+        assert array_equal(sb.data(), expected)
+        for data_size in (size - 2, size + 2):
+            sb.data_size = data_size
+            with pytest.raises(ValueError, match='does not match'):
+                sb.data()
+
+
 def test_stream_not_at_start() -> None:
     """Test CziFile reads stream positioned after CZI header."""
     filename = DATA / 'Test.czi'
@@ -1640,6 +1662,27 @@ def test_squeeze() -> None:
             10610736453,
         ),
         (
+            'CZIcmd/test_chunked_zstd.czi',
+            CziCompressionType.CHUNKED,
+            (3, 2, 3, 1536, 1536, 3),
+            'uint8',
+            10610736453,
+        ),
+        (
+            'CZIcmd/test_jpg.czi',
+            CziCompressionType.JPEG,
+            (3, 2, 3, 1536, 1536, 3),
+            'uint8',
+            10588177449,
+        ),
+        (
+            'CZIcmd/test_zstd1.czi',
+            CziCompressionType.ZSTDHDR,
+            (3, 2, 3, 1536, 1536, 3),
+            'uint8',
+            10610736453,
+        ),
+        (
             'SPIM_Compression_101.czi',
             CziCompressionType(1001),
             (2, 501, 180, 1488),
@@ -1653,8 +1696,7 @@ def test_squeeze() -> None:
             'uint16',
             ValueError,  # CAMERARAW is not supported
         ),
-        # CziCompressionType.JPEG (1) and CziCompressionType.LZW (2)
-        # are not covered; no test files are available.
+        # TODO: CziCompressionType.LZW (2) is not covered
     ],
 )
 def test_compression(
@@ -2539,6 +2581,34 @@ def test_pyramid_level_isolation() -> None:
 
         # asarray is deterministic: repeated call returns identical data
         assert array_equal(lv7.asarray(), arr7)
+
+
+def test_pyramid_merged_scenes() -> None:
+    """Test pyramid levels of merged scenes."""
+    filename = DATA / 'OpenSlide/Zeiss-5-JXR.czi'
+    if not filename.exists():
+        pytest.skip(f'{filename!r} not found')
+
+    with CziFile(filename) as czi:
+        assert len(czi.scenes) == 2
+        merged = czi.scenes()
+        assert merged.is_pyramid
+        assert len(merged.levels) == 5
+        assert merged.levels[0] is merged
+        assert merged.shape == (11338, 50159, 3)
+        assert merged.levels[-1].shape == (709, 3136, 3)
+        assert merged.levels[1].name == 'All scenes level 1'
+        assert merged.levels[-1].scene_indices == (0, 1)
+
+        # single scene via call matches mapping access
+        sc1 = czi.scenes(scene=1)
+        assert [lv.shape for lv in sc1.levels] == [
+            lv.shape for lv in czi.scenes[1].levels
+        ]
+        assert czi.scenes(scene=[1]).levels[-1].scene_indices == (1,)
+
+        # derived views do not have levels
+        assert len(merged(roi=merged.bbox).levels) == 1
 
 
 def test_pyramid_tiles_mislabelled() -> None:
