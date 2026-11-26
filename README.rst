@@ -14,13 +14,13 @@ with physical axis coordinates, multi-scene merging, per-dimension selection
 by integer, slice, or sequence, chunk-based iteration, and pyramid-level
 access. It handles Fast Airyscan upsampling and PALM downsampling with
 optional stored-resolution output, and assembles FCS and line-scan files from
-T-chunked subblocks. It also supports Zstd, Chunked, and JPEG XR compression,
-pixel type promotion across channels, and direct access to all ZISRAW segments
-and file-level attachments.
+T-chunked subblocks. It also supports Zstd, Chunked, JPEG, and JPEG XR
+compression, pixel type promotion across channels, and direct access to all
+ZISRAW segments and file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.11.12
+:Version: 2026.11.26
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -44,14 +44,20 @@ This revision was tested with the following requirements and dependencies
 (other versions may work):
 
 - `CPython <https://www.python.org>`_ 3.12.10, 3.13.17, 3.14.10, 3.15.2 64-bit
-- `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
+- `Numpy <https://pypi.org/project/numpy>`_ 2.5.5
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.11.11
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.12 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.16 (optional)
 
 Revisions
 ---------
+
+2026.11.26
+
+- Add pyramid levels to images of merged scenes.
+- Find pyramid levels on first access.
+- Read SYSTEMRAW subblocks only if data size matches stored size.
 
 2026.11.12
 
@@ -85,91 +91,6 @@ Revisions
 - Bound number of pending futures in CziImage.asarray.
 
 2026.8.16
-
-- Support experimental chunked-extensible compression.
-- Require imagecodecs >= 2026.8.16 for chunked codec.
-
-2026.6.12
-
-- Add CziDirectoryEntryDV.asimage convenience method.
-
-2026.6.6
-
-- Refactor segment, directory, and content file parsing (breaking).
-- Add memmap parameter to CziFile/imread for lock-free parallel subblock reads.
-- Add writable property to BinaryFile.
-- Change read_content functions to accept bytes or memoryview.
-- Remove read_array function.
-- Require imagecodecs >= 2026.6.6 for zstd1 codec.
-- Support Python 3.15.
-
-2026.4.30
-
-- Omit axes from coords when no meaningful metadata is available (breaking).
-- Return coords['T'] as float seconds instead of datetime64 (breaking).
-- Replace pixel_series with coord_scales in CziImage.attrs (breaking).
-- Add coord_offsets, coord_scales, coord_units, and mpp properties to CziImage.
-- Add datetime property to CziImage returning acquisition start as datetime64.
-- Drop support for numpy 2.0 (SPEC0).
-
-2026.4.11
-
-- Fall back to parsing numeric channel names as float coords['C'].
-
-2026.3.17
-
-- Add cache for decoded subblock arrays.
-- Prefer imagecodecs' WIC over JPEGXR codec if available.
-- Import imagecodecs functions on demand.
-
-2026.3.15
-
-- Replace CziImagePlanes with CziImageChunks (breaking).
-- Add CziImage.chunks method for flexible chunk-based iteration.
-- Add CziFile.metadata_segment property.
-- Add offset properties to CziAttachmentEntryA1 and subblock entry classes.
-- Add CziSegmentId.packed property returning the 16-byte on-disk field.
-- Manage update_pending flag in CziFile context manager for writable handles.
-- Improve documentation.
-
-2026.3.14
-
-- Add option to return pixel data at stored resolution.
-- Allow sequence and slice of scene indices in imread and asarray/asxarray.
-- Interpret dimension slice selection as absolute coordinates.
-- Add command line options to select dimensions.
-
-2026.3.12
-
-- Rewrite with many breaking changes.
-- Support Zstd compression schemes.
-- Support reading subblock masks.
-- Add CziFile.scenes interface.
-- Add pyramid level access via CziImage.levels.
-- Add option to read subset of image data.
-- Add option to iterate over image planes in any dimension order.
-- Add xarray-style attributes.
-- Add asxarray method to return image as xarray DataArray with metadata.
-- Add fillvalue and maxworkers parameters to asarray.
-- Add option to specify pixel type.
-- Promote pixel type when channels have mixed types.
-- Remove Mosaic dimension from CziDirectoryEntryDV.dims; use mosaic_index.
-- Reduce caching of CziDirectoryEntryDV properties.
-- Remove resize and order parameters from asarray (breaking).
-- Remove czi2tif function and command line script.
-- Prefix public class names with Czi.
-- Raise CziFileError for issues with CZI file structure.
-- Use logging instead of warnings.
-- Improve representation of instances.
-- Add pytest-based unit tests.
-- Add type hints.
-- Convert docstrings to Google style with Sphinx directives.
-- Remove imagecodecs-lite fallback; require imagecodecs.
-- Remove scipy/ndimage dependency.
-- Make tifffile an optional dependency.
-- Drop support for Python < 3.12 and numpy < 2 (SPEC 0).
-
-2019.7.2.3
 
 - …
 
@@ -212,6 +133,7 @@ Other libraries for reading CZI files (all GPL or LGPL licensed):
 `libczi <https://github.com/ZEISS/libczi>`__,
 `pylibCZIrw <https://pypi.org/project/pylibCZIrw>`__,
 `bioio-czi <https://github.com/bioio-devs/bioio-czi>`__,
+`aicspylibczi <https://github.com/bioio-devs/aicspylibczi>`__,
 `bio-formats <https://github.com/ome/bioformats>`_,
 `libCZI <https://github.com/zeiss-microscopy/libCZI>`__ (deprecated), and
 `pylibczi <https://github.com/elhuhdron/pylibczi>`__ (deprecated).
@@ -374,7 +296,7 @@ Access pyramid levels (scene -> level -> plane):
     ...     assert image.is_pyramid
     ...     assert len(image.levels) == 2  # full resolution + 1 downsampled level
     ...     assert image.levels[0] is image  # full resolution level is image
-    ...     level = image.levels[1]  # lowest-res level
+    ...     level = image.levels[-1]  # lowest-res level
     ...     assert level.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 243, 'X': 589}
     ...     arr = level.asarray()  # full level image as array
     ...     plane = level(T=0, C=0, Z=0).asarray()  # single plane as array
