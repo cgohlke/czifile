@@ -3,28 +3,35 @@ include README.rst
 include CHANGES.rst
 include pyproject.toml
 
+include setup.py
 include czifile/py.typed
-
-exclude benchmark_czifile_vs_pylibczirw.py
 
 exclude .env
 exclude .gitignore
-exclude *.cmd
-exclude *.yaml
 exclude *.code-workspace
+exclude bench*.py
 exclude mypy.ini
 exclude ruff.toml
 exclude typos.toml
-recursive-exclude .vscode *
+
+global-exclude *.ini
+global-exclude *.cmd
+global-exclude *.rar
+global-exclude *.zip
+global-exclude *.md
+global-exclude *.yaml
+global-exclude *.html
+global-exclude *?-?Copy*
+
 recursive-exclude doc *
 recursive-exclude docs *
 recursive-exclude test *
 recursive-exclude tests *
 recursive-exclude examples *
-
+recursive-exclude test/data *
+recursive-exclude test/_tmp *
 recursive-exclude * __pycache__
 recursive-exclude * *.py[co]
-recursive-exclude * *Copy*
 
 include tests/conftest.py
 include tests/test_czifile.py
