@@ -41,13 +41,13 @@ with physical axis coordinates, multi-scene merging, per-dimension selection
 by integer, slice, or sequence, chunk-based iteration, and pyramid-level
 access. It handles Fast Airyscan upsampling and PALM downsampling with
 optional stored-resolution output, and assembles FCS and line-scan files from
-T-chunked subblocks. It also supports Zstd, Chunked, and JPEG XR compression,
-pixel type promotion across channels, and direct access to all ZISRAW segments
-and file-level attachments.
+T-chunked subblocks. It also supports Zstd, Chunked, JPEG, and JPEG XR
+compression, pixel type promotion across channels, and direct access to all
+ZISRAW segments and file-level attachments.
 
 :Author: `Christoph Gohlke <https://www.cgohlke.com>`_
 :License: BSD-3-Clause
-:Version: 2026.11.12
+:Version: 2026.11.26
 :DOI: `10.5281/zenodo.14948581 <https://doi.org/10.5281/zenodo.14948581>`_
 
 Quickstart
@@ -71,14 +71,20 @@ This revision was tested with the following requirements and dependencies
 (other versions may work):
 
 - `CPython <https://www.python.org>`_ 3.12.10, 3.13.17, 3.14.10, 3.15.2 64-bit
-- `Numpy <https://pypi.org/project/numpy>`_ 2.5.4
+- `Numpy <https://pypi.org/project/numpy>`_ 2.5.5
 - `Imagecodecs <https://pypi.org/project/imagecodecs>`_ 2026.11.11
 - `Xarray <https://pypi.org/project/xarray>`_ 2026.9.0 (recommended)
 - `Matplotlib <https://pypi.org/project/matplotlib/>`_ 3.11.2 (optional)
-- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.12 (optional)
+- `Tifffile <https://pypi.org/project/tifffile/>`_ 2026.11.16 (optional)
 
 Revisions
 ---------
+
+2026.11.26
+
+- Add pyramid levels to images of merged scenes.
+- Find pyramid levels on first access.
+- Read SYSTEMRAW subblocks only if data size matches stored size.
 
 2026.11.12
 
@@ -112,91 +118,6 @@ Revisions
 - Bound number of pending futures in CziImage.asarray.
 
 2026.8.16
-
-- Support experimental chunked-extensible compression.
-- Require imagecodecs >= 2026.8.16 for chunked codec.
-
-2026.6.12
-
-- Add CziDirectoryEntryDV.asimage convenience method.
-
-2026.6.6
-
-- Refactor segment, directory, and content file parsing (breaking).
-- Add memmap parameter to CziFile/imread for lock-free parallel subblock reads.
-- Add writable property to BinaryFile.
-- Change read_content functions to accept bytes or memoryview.
-- Remove read_array function.
-- Require imagecodecs >= 2026.6.6 for zstd1 codec.
-- Support Python 3.15.
-
-2026.4.30
-
-- Omit axes from coords when no meaningful metadata is available (breaking).
-- Return coords['T'] as float seconds instead of datetime64 (breaking).
-- Replace pixel_series with coord_scales in CziImage.attrs (breaking).
-- Add coord_offsets, coord_scales, coord_units, and mpp properties to CziImage.
-- Add datetime property to CziImage returning acquisition start as datetime64.
-- Drop support for numpy 2.0 (SPEC0).
-
-2026.4.11
-
-- Fall back to parsing numeric channel names as float coords['C'].
-
-2026.3.17
-
-- Add cache for decoded subblock arrays.
-- Prefer imagecodecs' WIC over JPEGXR codec if available.
-- Import imagecodecs functions on demand.
-
-2026.3.15
-
-- Replace CziImagePlanes with CziImageChunks (breaking).
-- Add CziImage.chunks method for flexible chunk-based iteration.
-- Add CziFile.metadata_segment property.
-- Add offset properties to CziAttachmentEntryA1 and subblock entry classes.
-- Add CziSegmentId.packed property returning the 16-byte on-disk field.
-- Manage update_pending flag in CziFile context manager for writable handles.
-- Improve documentation.
-
-2026.3.14
-
-- Add option to return pixel data at stored resolution.
-- Allow sequence and slice of scene indices in imread and asarray/asxarray.
-- Interpret dimension slice selection as absolute coordinates.
-- Add command line options to select dimensions.
-
-2026.3.12
-
-- Rewrite with many breaking changes.
-- Support Zstd compression schemes.
-- Support reading subblock masks.
-- Add CziFile.scenes interface.
-- Add pyramid level access via CziImage.levels.
-- Add option to read subset of image data.
-- Add option to iterate over image planes in any dimension order.
-- Add xarray-style attributes.
-- Add asxarray method to return image as xarray DataArray with metadata.
-- Add fillvalue and maxworkers parameters to asarray.
-- Add option to specify pixel type.
-- Promote pixel type when channels have mixed types.
-- Remove Mosaic dimension from CziDirectoryEntryDV.dims; use mosaic_index.
-- Reduce caching of CziDirectoryEntryDV properties.
-- Remove resize and order parameters from asarray (breaking).
-- Remove czi2tif function and command line script.
-- Prefix public class names with Czi.
-- Raise CziFileError for issues with CZI file structure.
-- Use logging instead of warnings.
-- Improve representation of instances.
-- Add pytest-based unit tests.
-- Add type hints.
-- Convert docstrings to Google style with Sphinx directives.
-- Remove imagecodecs-lite fallback; require imagecodecs.
-- Remove scipy/ndimage dependency.
-- Make tifffile an optional dependency.
-- Drop support for Python < 3.12 and numpy < 2 (SPEC 0).
-
-2019.7.2.3
 
 - …
 
@@ -239,6 +160,7 @@ Other libraries for reading CZI files (all GPL or LGPL licensed):
 `libczi <https://github.com/ZEISS/libczi>`__,
 `pylibCZIrw <https://pypi.org/project/pylibCZIrw>`__,
 `bioio-czi <https://github.com/bioio-devs/bioio-czi>`__,
+`aicspylibczi <https://github.com/bioio-devs/aicspylibczi>`__,
 `bio-formats <https://github.com/ome/bioformats>`_,
 `libCZI <https://github.com/zeiss-microscopy/libCZI>`__ (deprecated), and
 `pylibczi <https://github.com/elhuhdron/pylibczi>`__ (deprecated).
@@ -385,7 +307,7 @@ Access pyramid levels (scene -> level -> plane):
 ...     assert image.is_pyramid
 ...     assert len(image.levels) == 2  # full resolution + 1 downsampled level
 ...     assert image.levels[0] is image  # full resolution level is image
-...     level = image.levels[1]  # lowest-res level
+...     level = image.levels[-1]  # lowest-res level
 ...     assert level.sizes == {'T': 2, 'C': 2, 'Z': 3, 'Y': 243, 'X': 589}
 ...     arr = level.asarray()  # full level image as array
 ...     plane = level(T=0, C=0, Z=0).asarray()  # single plane as array
@@ -469,7 +391,7 @@ View the images and metadata in a CZI file from the console::
 
 from __future__ import annotations
 
-__version__ = '2026.11.12'
+__version__ = '2026.11.26'
 
 __all__ = [
     'CONVERT_PIXELTYPE',
@@ -1833,7 +1755,7 @@ class CziImage:
     _selection: dict[str, int | slice | Sequence[int] | None]
     _pixeltype: CziPixelType | None
     _storedsize: bool
-    _levels: list[CziImage]
+    _scene_keys: set[int] | None  # set by CziScenes to enable levels
 
     def __init__(
         self,
@@ -1856,7 +1778,7 @@ class CziImage:
         self._selection = dict(selection) if selection else {}
         self._pixeltype = pixeltype
         self._storedsize = storedsize
-        self._levels = [self]
+        self._scene_keys = None
 
     def __call__(
         self,
@@ -2674,15 +2596,27 @@ class CziImage:
         """Filtered directory entries for this image view."""
         return self._entries
 
-    @property
+    @cached_property
     def levels(self) -> list[CziImage]:
-        """Pyramid levels. ``levels[0]`` is this image."""
-        return self._levels
+        """Pyramid levels. ``levels[0]`` is this image.
+
+        Images returned by :py:class:`CziScenes` include the downsampled
+        pyramid levels of the selected scenes. Levels missing in any of the
+        selected scenes are omitted. Images derived by dimension selection,
+        ROI, chunking, or from directory entries have only one level.
+
+        """
+        if self._scene_keys is None:
+            return [self]
+        return [
+            self,
+            *self._parent.scenes._pyramid_levels(self, self._scene_keys),
+        ]
 
     @property
     def is_pyramid(self) -> bool:
         """Image has multiple pyramid levels."""
-        return len(self._levels) > 1
+        return len(self.levels) > 1
 
     @property
     def is_pyramid_level(self) -> bool:
@@ -3429,10 +3363,8 @@ class CziImage:
         return default_maxworkers()
 
     def __repr__(self) -> str:
-        if len(self._levels) > 1:
-            levels = f' {len(self._levels)} levels'
-        else:
-            levels = ''
+        n = len(self.levels)
+        levels = f' {n} levels' if n > 1 else ''
         ss = ' storedsize' if self._storedsize else ''
         dims = ', '.join(f'{k}: {v}' for k, v in self.sizes.items())
         return (
@@ -3995,6 +3927,7 @@ class CziScenes(collections.abc.Mapping[int, CziImage]):
         )
         if roi is not None or selection:
             return image(roi=roi, **selection)  # type: ignore[arg-type]
+        image._scene_keys = key_set
         return image
 
     def __getitem__(self, key: int, /) -> CziImage:
@@ -4043,7 +3976,18 @@ class CziScenes(collections.abc.Mapping[int, CziImage]):
             name=name,
             squeeze=self._squeeze,
         )
-        # populate pyramid levels
+        image._scene_keys = {key}
+        return image
+
+    def _pyramid_levels(
+        self, image: CziImage, keys: set[int], /
+    ) -> list[CziImage]:
+        """Return downsampled pyramid levels of selected scenes.
+
+        Levels missing in any of the selected scenes are omitted.
+
+        """
+        levels: list[CziImage] = []
         if self._implicit:
             pyramid_entries = [
                 e
@@ -4054,26 +3998,37 @@ class CziScenes(collections.abc.Mapping[int, CziImage]):
             pyramid_entries = [
                 e
                 for e in self._parent.subblock_directory
-                if e.pyramid_type != 0 and e.scene_index in {-1, key}
+                if e.pyramid_type != 0
+                and (e.scene_index == -1 or e.scene_index in keys)
             ]
-        if pyramid_entries:
-            # group by scale factor
-            levels_by_scale: dict[
-                tuple[float, ...], list[CziDirectoryEntryDV]
-            ] = {}
-            for e in pyramid_entries:
-                lkey = normalize_pyramid_scale(e.scale)
-                levels_by_scale.setdefault(lkey, []).append(e)
-            for scale in sorted(levels_by_scale):
-                level_entries = tuple(levels_by_scale[scale])
-                level = CziImage(
-                    self._parent,
-                    level_entries,
-                    name=f'{name} level {len(image._levels)}',
-                    squeeze=self._squeeze,
-                )
-                image._levels.append(level)
-        return image
+        if not pyramid_entries:
+            return levels
+
+        # group by scale factor
+        levels_by_scale: dict[tuple[float, ...], list[CziDirectoryEntryDV]]
+        scenes_by_scale: dict[tuple[float, ...], set[int]]
+        levels_by_scale = {}
+        scenes_by_scale = {}
+        for e in pyramid_entries:
+            lkey = normalize_pyramid_scale(e.scale)
+            levels_by_scale.setdefault(lkey, []).append(e)
+            scenes_by_scale.setdefault(lkey, set()).add(e.scene_index)
+        for scale in sorted(levels_by_scale):
+            level_scenes = scenes_by_scale[scale]
+            if (
+                not self._implicit
+                and -1 not in level_scenes
+                and not keys <= level_scenes
+            ):
+                continue
+            level = CziImage(
+                self._parent,
+                tuple(levels_by_scale[scale]),
+                name=f'{image.name} level {len(levels) + 1}',
+                squeeze=self._squeeze,
+            )
+            levels.append(level)
+        return levels
 
     def _resolve_keys(self, scene: SelectionValue, /) -> tuple[int, ...]:
         """Resolve scene argument to a tuple of valid scene keys."""
@@ -4581,7 +4536,7 @@ class CziSubBlockSegmentData(CziSegmentData):
             cached = decode_cache.get(self.data_offset)
             if cached is not None:
                 return cached.copy() if copy else cached
-        if decode is not None:
+
             data = czifile._read_at(self.data_offset, self.data_size)
             if len(data) != self.data_size:
                 msg = 'failed to read all segment data'
@@ -4607,17 +4562,24 @@ class CziSubBlockSegmentData(CziSegmentData):
                 image = numpy.frombuffer(decode(data, out=size), dtype)
             else:
                 image = decode(data, out=size)
-        elif compression == 0 or compression > 999:
-            # SYSTEMRAW (>999) is read as raw, uncompressed pixels.
-            # CAMERARAW (100-999) is not supported and raises below.
-            # Callers compositing via CziImage.asarray see a warning there.
-            # Direct callers of data() do not.
-            # Ignore bytes after pixels
+        elif compression == 0:
+            # uncompressed: ignore bytes after pixels
             image = czifile._read_array(
                 self.data_offset,
                 min(self.data_size // dtype.itemsize, total),
                 dtype,
                 truncate=False,
+            )
+        elif compression > 999:
+            # SYSTEMRAW: assume raw pixels if size matches
+            if self.data_size != size:
+                msg = (
+                    f'{compression!r} data size {self.data_size} '
+                    f'does not match stored size {size}'
+                )
+                raise ValueError(msg)
+            image = czifile._read_array(
+                self.data_offset, total, dtype, truncate=False
             )
         else:
             msg = f'{compression!r} invalid or not supported'
@@ -6254,12 +6216,12 @@ class CziCompressionType(enum.IntEnum):
             Decoder callable, or ``None`` if no decoder is needed.
 
         """
-        result: Callable[..., Any] | None
+        decoder: Callable[..., Any] | None
         match value:
-            case 1:  # | 3
-                result = imagecodecs.jpeg_decode
+            case 1 | 3:
+                decoder = imagecodecs.jpeg_decode
             case 2:
-                result = imagecodecs.lzw_decode
+                decoder = imagecodecs.lzw_decode
             case 4:
                 name = os.environ.get(
                     'CZIFILE_JPEGXR_DECODER', 'jpegxr'
@@ -6269,20 +6231,20 @@ class CziCompressionType(enum.IntEnum):
                         f'invalid CZIFILE_JPEGXR_DECODER={name!r}'
                     )
                 if name == 'wic' and imagecodecs.WIC.available:
-                    result = imagecodecs.wic_decode
+                    decoder = imagecodecs.wic_decode
                 else:
-                    result = imagecodecs.jpegxr_decode
+                    decoder = imagecodecs.jpegxr_decode
             case 5 | 6:
-                result = imagecodecs.zstd1_decode
+                decoder = imagecodecs.zstd1_decode
             case 7:
-                result = imagecodecs.chunked_decode
+                decoder = imagecodecs.chunked_decode
             case _:
-                result = None
-        if result is not None:
-            mod = getattr(result, '__module__', '') or ''
+                decoder = None
+        if decoder is not None:
+            mod = getattr(decoder, '__module__', '') or ''
             if mod.split('.', 1)[0] != 'imagecodecs':
-                raise RuntimeError(result)
-        return result
+                raise RuntimeError(decoder)
+        return decoder
 
 
 class CziPyramidType(enum.IntEnum):
