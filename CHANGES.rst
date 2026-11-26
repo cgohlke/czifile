@@ -4,6 +4,12 @@
 Revisions
 =========
 
+2026.11.26
+
+- Add pyramid levels to images of merged scenes.
+- Find pyramid levels on first access.
+- Read SYSTEMRAW subblocks only if data size matches stored size.
+
 2026.11.12
 
 - Fix reading uncompressed subblocks with bytes after pixels.
@@ -35,10 +41,7 @@ Revisions
 - Size chunks decode cache by predominant subblock size.
 - Bound number of pending futures in CziImage.asarray.
 
-2026.8.16
-
-- Support experimental chunked-extensible compression.
-- Require imagecodecs >= 2026.8.16 for chunked codec.
+2026.8.16 for chunked codec.
 
 2026.6.12
 
